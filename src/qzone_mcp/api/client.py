@@ -1,13 +1,28 @@
 import asyncio
-import json
 import logging
-import re
 from typing import List, Optional, Dict, Any
 
 import aiohttp
 
 from .session import QzoneSession, LoginExpiredError
-from .model import Feed, FeedImage, FeedComment, Visitor, PublishResult, LikeResult, CommentResult
+from .model import Feed, FeedImage, FeedComment, Visitor, PublishResult, LikeResult, CommentResult, ApiResponse
+from .parser import QzoneParser
+from .constants import (
+    HTTP_STATUS_UNAUTHORIZED,
+    HTTP_STATUS_FORBIDDEN,
+    QZONE_CODE_LOGIN_EXPIRED,
+    QZONE_CODE_UNKNOWN,
+    QZONE_MSG_PERMISSION_DENIED,
+    QZONE_INTERNAL_META_KEY,
+    QZONE_INTERNAL_HTTP_STATUS_KEY,
+    QZONE_LIST_URL,
+    QZONE_DETAIL_URL,
+    QZONE_EMOTION_URL,
+    QZONE_DOLIKE_URL,
+    QZONE_COMMENT_URL,
+    QZONE_VISITOR_URL,
+    QZONE_BASE_URL,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -24,41 +39,68 @@ class QzoneClient:
             )
         return self._http_session
 
-    async def request(self, method: str, url: str, retry: int = 0, **kwargs) -> Any:
+    async def request(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: dict[str, Any] | None = None,
+        data: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+        timeout: int | None = None,
+        retry: int = 0,
+    ) -> dict[str, Any]:
         ctx = await self.session.get_ctx()
         session = await self._get_http_session()
 
+        kwargs: dict[str, Any] = {
+            "params": params or {},
+        }
+        if data:
+            kwargs["data"] = data
         kwargs.setdefault("headers", {})
         kwargs["headers"].update(ctx.headers())
         kwargs["cookies"] = ctx.cookies()
 
         try:
-            async with session.request(method, url, **kwargs) as resp:
-                body = await resp.read()
-                text = body.decode("utf-8", errors="replace")
-                if resp.status == 401 or ("登录" in text):
-                    raise LoginExpiredError("登录失效")
-                try:
-                    match = re.search(r'[_a-zA-Z]\w*\(([\s\S]*)\)(?:;|$)', text)
-                    if match:
-                        cleaned = match.group(1)
-                    else:
-                        cleaned = text.strip()
-                    parsed = json.loads(cleaned)
-                    return parsed
-                except Exception as e:
-                    return text
+            async with session.request(method, url, timeout=timeout, **kwargs) as resp:
+                text = await resp.text()
+
+            parsed = QzoneParser.parse_response(text)
+            meta = parsed.get(QZONE_INTERNAL_META_KEY)
+            if not isinstance(meta, dict):
+                meta = {}
+                parsed[QZONE_INTERNAL_META_KEY] = meta
+            meta[QZONE_INTERNAL_HTTP_STATUS_KEY] = resp.status
+
+            if resp.status == HTTP_STATUS_UNAUTHORIZED or parsed.get("code") == QZONE_CODE_LOGIN_EXPIRED:
+                if retry >= self.session.cfg.qzone.max_retries:
+                    raise RuntimeError("登录失效，重试失败")
+
+                logger.warning("登录失效，重新登录中")
+                await self.session.invalidate()
+                await self.session.login()
+                return await self.request(
+                    method, url, params=params, data=data, headers=headers, retry=retry + 1
+                )
+
+            if resp.status == HTTP_STATUS_FORBIDDEN and parsed.get("code") in (QZONE_CODE_UNKNOWN, None):
+                parsed["code"] = resp.status
+                parsed["message"] = QZONE_MSG_PERMISSION_DENIED
+
+            return parsed
+
         except LoginExpiredError:
             if retry >= self.session.cfg.qzone.max_retries:
                 raise
             await self.session.invalidate()
             await asyncio.sleep(self.session.cfg.qzone.retry_delay * (retry + 1))
-            return await self.request(method, url, retry + 1, **kwargs)
+            return await self.request(method, url, params=params, data=data, headers=headers, retry=retry + 1)
         except aiohttp.ClientError as e:
             if retry >= self.session.cfg.qzone.max_retries:
                 raise
             await asyncio.sleep(self.session.cfg.qzone.retry_delay * (retry + 1))
-            return await self.request(method, url, retry + 1, **kwargs)
+            return await self.request(method, url, params=params, data=data, headers=headers, retry=retry + 1)
 
     async def get_feeds(
         self,
@@ -69,8 +111,7 @@ class QzoneClient:
     ) -> List[Feed]:
         ctx = await self.session.get_ctx()
         uin = user_id or ctx.uin
-        url = f"https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_msglist_v6"
-        
+
         params = {
             "uin": uin,
             "pos": pos,
@@ -79,13 +120,12 @@ class QzoneClient:
             "g_tk": ctx.gtk2,
         }
 
-        data = await self.request("GET", url, params=params)
-        return self._parse_feeds(data, with_detail=with_detail)
+        data = await self.request("GET", QZONE_LIST_URL, params=params)
+        return QzoneParser.parse_feeds(data, with_detail=with_detail)
 
     async def get_post_detail(self, tid: str, author_uin: int) -> Feed:
         ctx = await self.session.get_ctx()
-        url = f"https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_msgdetail_v6"
-        
+
         params = {
             "tid": tid,
             "uin": author_uin,
@@ -93,15 +133,14 @@ class QzoneClient:
             "g_tk": ctx.gtk2,
         }
 
-        data = await self.request("GET", url, params=params)
-        feeds = self._parse_feeds(data, with_detail=True)
+        data = await self.request("GET", QZONE_DETAIL_URL, params=params)
+        feeds = QzoneParser.parse_feeds(data, with_detail=True)
         return feeds[0] if feeds else Feed(tid=tid, uin=author_uin, nickname="", content="")
 
     async def publish_post(self, text: str, image_urls: Optional[List[str]] = None) -> PublishResult:
         ctx = await self.session.get_ctx()
-        url = f"https://user.qzone.qq.com/proxy/domain/taotao.qzone.qq.com/cgi-bin/emotion_cgi_publish_v6"
 
-        data = {
+        data: dict[str, Any] = {
             "syn_tweet_verson": "1",
             "paramstr": "1",
             "who": "1",
@@ -113,19 +152,21 @@ class QzoneClient:
             "hostuin": ctx.uin,
             "code_version": "1",
             "format": "json",
-            "qzreferrer": f"https://user.qzone.qq.com/{ctx.uin}",
+            "qzreferrer": f"{QZONE_BASE_URL}/{ctx.uin}",
         }
 
         if image_urls:
             data["pic_url"] = "|".join(image_urls)
 
-        resp = await self.request("POST", url, params={"g_tk": ctx.gtk2, "uin": ctx.uin}, data=data)
+        resp = await self.request("POST", QZONE_EMOTION_URL, params={"g_tk": ctx.gtk2, "uin": ctx.uin}, data=data)
         logger.debug(f"publish_post response: {resp}")
-        if isinstance(resp, dict) and resp.get("code") == 0:
-            tid = resp.get("tid", "")
-            if not tid and resp.get("feedinfo"):
+
+        api_resp = ApiResponse.from_raw(resp)
+        if api_resp.ok:
+            tid = api_resp.data.get("tid", "")
+            if not tid and api_resp.data.get("feedinfo"):
                 import re
-                match = re.search(r'fct_\d+_\d+_\d+_(\d+)', resp["feedinfo"])
+                match = re.search(r'fct_\d+_\d+_\d+_(\d+)', api_resp.data["feedinfo"])
                 if match:
                     tid = match.group(1)
             logger.info(f"发布说说成功 - tid: {tid}, content: {text[:50]}...")
@@ -135,13 +176,12 @@ class QzoneClient:
 
     async def like_post(self, tid: str, author_uin: int) -> LikeResult:
         ctx = await self.session.get_ctx()
-        url = f"https://user.qzone.qq.com/proxy/domain/w.qzone.qq.com/cgi-bin/likes/internal_dolike_app"
 
         data = {
-            "qzreferrer": f"https://user.qzone.qq.com/{ctx.uin}",
+            "qzreferrer": f"{QZONE_BASE_URL}/{ctx.uin}",
             "opuin": ctx.uin,
-            "unikey": f"https://user.qzone.qq.com/{author_uin}/mood/{tid}",
-            "curkey": f"https://user.qzone.qq.com/{author_uin}/mood/{tid}",
+            "unikey": f"{QZONE_BASE_URL}/{author_uin}/mood/{tid}",
+            "curkey": f"{QZONE_BASE_URL}/{author_uin}/mood/{tid}",
             "appid": 311,
             "from": 1,
             "typeid": 0,
@@ -151,14 +191,14 @@ class QzoneClient:
             "fupdate": 1,
         }
 
-        resp = await self.request("POST", url, params={"g_tk": ctx.gtk2}, data=data)
-        if isinstance(resp, dict) and resp.get("code") == 0:
+        resp = await self.request("POST", QZONE_DOLIKE_URL, params={"g_tk": ctx.gtk2}, data=data)
+        api_resp = ApiResponse.from_raw(resp)
+        if api_resp.ok:
             return LikeResult(success=True, message="点赞成功")
         return LikeResult(success=False, message="点赞失败")
 
     async def comment_post(self, tid: str, author_uin: int, content: str) -> CommentResult:
         ctx = await self.session.get_ctx()
-        url = f"https://user.qzone.qq.com/proxy/domain/taotao.qzone.qq.com/cgi-bin/emotion_cgi_re_feeds"
 
         data = {
             "topicId": f"{author_uin}_{tid}__1",
@@ -175,14 +215,14 @@ class QzoneClient:
             "content": content,
         }
 
-        resp = await self.request("POST", url, params={"g_tk": ctx.gtk2}, data=data)
-        if isinstance(resp, dict) and (resp.get("code") == 0 or resp.get("result") == 0):
+        resp = await self.request("POST", QZONE_COMMENT_URL, params={"g_tk": ctx.gtk2}, data=data)
+        api_resp = ApiResponse.from_raw(resp)
+        if api_resp.ok or resp.get("result") == 0:
             return CommentResult(success=True, comment_id=str(resp.get("commentId", "")), message="评论成功")
         return CommentResult(success=False, message="评论失败")
 
     async def reply_comment(self, tid: str, author_uin: int, comment_id: str, content: str) -> CommentResult:
         ctx = await self.session.get_ctx()
-        url = f"https://user.qzone.qq.com/proxy/domain/taotao.qzone.qq.com/cgi-bin/emotion_cgi_re_feeds"
 
         data = {
             "topicId": f"{author_uin}_{tid}__1",
@@ -203,79 +243,29 @@ class QzoneClient:
             "richtype": "",
             "private": "0",
             "paramstr": "2",
-            "qzreferrer": f"https://user.qzone.qq.com/{ctx.uin}/main",
+            "qzreferrer": f"{QZONE_BASE_URL}/{ctx.uin}/main",
         }
 
-        resp = await self.request("POST", url, params={"g_tk": ctx.gtk2}, data=data)
-        if isinstance(resp, dict) and (resp.get("code") == 0 or resp.get("result") == 0):
+        resp = await self.request("POST", QZONE_COMMENT_URL, params={"g_tk": ctx.gtk2}, data=data)
+        api_resp = ApiResponse.from_raw(resp)
+        if api_resp.ok or resp.get("result") == 0:
             return CommentResult(success=True, comment_id=str(resp.get("replyId", "")), message="回复成功")
         return CommentResult(success=False, message="回复失败")
 
-    async def get_visitors(self, page: int = 1, num: int = 20) -> List[Visitor]:
+    async def get_visitors(self, page: int = 1, num: int = 20) -> str:
         ctx = await self.session.get_ctx()
-        url = f"https://user.qzone.qq.com/proxy/domain/r.qzone.qq.com/cgi-bin/main_page_cgi"
 
         params = {
             "uin": ctx.uin,
-            "page": page,
-            "num": num,
-            "format": "json",
+            "mask": 7,
             "g_tk": ctx.gtk2,
+            "page": page,
+            "fupdate": 1,
+            "clear": 1,
         }
 
-        data = await self.request("GET", url, params=params)
-        return self._parse_visitors(data)
-
-    def _parse_feeds(self, data: Dict[str, Any], with_detail: bool = False) -> List[Feed]:
-        feeds = []
-        msglist = data.get("msglist", [])
-        
-        for item in msglist:
-            images = []
-            if item.get("pic"):
-                for pic in item["pic"]:
-                    images.append(FeedImage(url=pic.get("url")))
-            
-            comments = []
-            if with_detail and item.get("commentlist"):
-                for c in item["commentlist"]:
-                    comments.append(FeedComment(
-                        id=str(c.get("commentid")),
-                        uin=c.get("uin", 0),
-                        nickname=c.get("name", ""),
-                        content=c.get("content", ""),
-                        time=c.get("time", "")
-                    ))
-            
-            feeds.append(Feed(
-                tid=str(item.get("tid", "")),
-                uin=item.get("uin", 0),
-                nickname=item.get("name", ""),
-                content=item.get("content", ""),
-                images=images,
-                likes=item.get("like_num", 0),
-                comments=item.get("comment_num", 0),
-                shares=item.get("share_num", 0),
-                time=item.get("time", ""),
-                comment_list=comments,
-                is_liked=item.get("is_liked", False)
-            ))
-        
-        return feeds
-
-    def _parse_visitors(self, data: Dict[str, Any]) -> List[Visitor]:
-        visitors = []
-        visitor_list = data.get("visitor", {}).get("list", [])
-        
-        for item in visitor_list:
-            visitors.append(Visitor(
-                uin=item.get("uin", 0),
-                nickname=item.get("name", ""),
-                avatar=item.get("face", ""),
-                time=item.get("time", "")
-            ))
-        
-        return visitors
+        data = await self.request("GET", QZONE_VISITOR_URL, params=params)
+        return QzoneParser.parse_visitors(data)
 
     async def close(self):
         if self._http_session:

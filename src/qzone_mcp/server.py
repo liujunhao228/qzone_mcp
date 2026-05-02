@@ -387,19 +387,7 @@ async def qzone_get_visitors(
         num: 每页数量，建议不超过50
     
     Returns:
-        访客列表，包含访客昵称、QQ号和访问时间
-    
-    Example:
-        {
-            "result": [
-                {
-                    "uin": 987654321,
-                    "nickname": "李四",
-                    "avatar": "https://q.qlogo.cn/...",
-                    "time": "2024-01-15 10:30"
-                }
-            ]
-        }
+        访客列表（Markdown格式），包含访客昵称、来源、状态和访问时间
     """
     try:
         if page < 1:
@@ -409,7 +397,7 @@ async def qzone_get_visitors(
             return ToolResult(content="参数错误：num 必须在 1-50 之间")
         
         visitors = await client.get_visitors(page, num)
-        return ToolResult(structured_content={"result": [v.model_dump() for v in visitors]})
+        return ToolResult(content=visitors)
     except LoginExpiredError:
         return ToolResult(content="登录失效，请使用 qzone_set_cookie 工具重新设置Cookie")
     except ValueError as e:

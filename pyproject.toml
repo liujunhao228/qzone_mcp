@@ -1,0 +1,56 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "qzone-mcp"
+version = "1.0.0"
+description = "QQ空间 MCP 服务器 - 让 AI Agent 能够操作 QQ 空间"
+requires-python = ">=3.10"
+keywords = ["mcp", "qq", "qzone", "ai-agent"]
+authors = [
+  { name = "Developer", email = "dev@example.com" }
+]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+]
+dependencies = [
+  "fastmcp>=0.1.0",
+  "aiohttp>=3.9.0",
+  "pydantic>=2.0",
+  "pydantic-settings>=2.0",
+  "typer>=0.9",
+  "python-dotenv>=1.0",
+  "pytest>=9.0.3",
+  "pytest-asyncio>=0.23.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest",
+  "pytest-asyncio",
+  "pytest-cov",
+  "ruff",
+  "mypy"
+]
+
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
+
+[project.scripts]
+qzone-cli = "qzone_mcp.cli:main"
+qzone-mcp = "qzone_mcp.server:main"
+
+[tool.hatch.envs.default]
+dependencies = ["pytest", "pytest-asyncio"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-p pytest_asyncio"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"

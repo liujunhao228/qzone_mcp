@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 from typing import List, Optional, Dict, Any
 
@@ -32,12 +33,22 @@ class QzoneClient:
 
         try:
             async with session.request(method, url, **kwargs) as resp:
-                text = await resp.text()
-                if resp.status == 401 or (text and "登录" in text):
+                body = await resp.read()
+                text = body.decode("utf-8", errors="replace")
+                if resp.status == 401 or ("登录" in text):
                     raise LoginExpiredError("登录失效")
                 try:
-                    return await resp.json()
-                except Exception:
+                    # QZone API 返回格式如: _Callback({...});  —— JSONP 包裹
+                    cleaned = text.strip()
+                    # 剥掉 _Callback(...); 或 _Callback(...) 包裹
+                    if "_Callback(" in cleaned:
+                        start = cleaned.index("_Callback(") + len("_Callback(")
+                        end = cleaned.rfind(")")
+                        if end > start:
+                            cleaned = cleaned[start:end]
+                    parsed = json.loads(cleaned)
+                    return parsed
+                except Exception as e:
                     return text
         except LoginExpiredError:
             if retry >= self.session.cfg.qzone.max_retries:

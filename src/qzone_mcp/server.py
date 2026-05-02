@@ -18,9 +18,10 @@ from .config import config
 from .db.manager import db_manager
 from .db.repository import FeedRepository, CommentRepository
 from .draft.service import DraftService
+from .logging import get_logger, init_logging
 
-logging.basicConfig(level=config.log_level)
-logger = logging.getLogger(__name__)
+init_logging()
+logger = get_logger(__name__)
 
 mcp = FastMCP(
     name="qzone",

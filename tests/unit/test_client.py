@@ -126,4 +126,9 @@ class TestQzoneClient:
             json_data={"code": 0, "commentId": "789012"}
         )
 
-        with patch("aio
+        with patch("aiohttp.ClientSession", return_value=mock_session):
+            result = await client.comment_post("123456", "test comment")
+
+            assert result.success is True
+            assert result.comment_id == "789012"
+            assert result.message == "评论成功"

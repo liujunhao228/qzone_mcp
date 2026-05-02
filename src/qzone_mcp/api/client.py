@@ -1,10 +1,13 @@
 import asyncio
+import logging
 from typing import List, Optional, Dict, Any
 
 import aiohttp
 
 from .session import QzoneSession, LoginExpiredError
 from .model import Feed, FeedImage, FeedComment, Visitor, PublishResult, LikeResult, CommentResult
+
+logger = logging.getLogger(__name__)
 
 
 class QzoneClient:
@@ -108,8 +111,17 @@ class QzoneClient:
             data["pic_url"] = "|".join(image_urls)
 
         resp = await self.request("POST", url, params={"g_tk": ctx.gtk2, "uin": ctx.uin}, data=data)
+        logger.debug(f"publish_post response: {resp}")
         if isinstance(resp, dict) and resp.get("code") == 0:
-            return PublishResult(success=True, tid=str(resp.get("tid", "")), message="发布成功")
+            tid = resp.get("tid", "")
+            if not tid and resp.get("feedinfo"):
+                import re
+                match = re.search(r'fct_\d+_\d+_\d+_(\d+)', resp["feedinfo"])
+                if match:
+                    tid = match.group(1)
+            logger.info(f"发布说说成功 - tid: {tid}, content: {text[:50]}...")
+            return PublishResult(success=True, tid=tid, message="发布成功")
+        logger.warning(f"发布说说失败 - content: {text[:50]}..., response: {resp}")
         return PublishResult(success=False, message="发布失败")
 
     async def like_post(self, tid: str, author_uin: int) -> LikeResult:

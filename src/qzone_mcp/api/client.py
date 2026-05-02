@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import re
 from typing import List, Optional, Dict, Any
 
 import aiohttp
@@ -38,14 +39,11 @@ class QzoneClient:
                 if resp.status == 401 or ("登录" in text):
                     raise LoginExpiredError("登录失效")
                 try:
-                    # QZone API 返回格式如: _Callback({...});  —— JSONP 包裹
-                    cleaned = text.strip()
-                    # 剥掉 _Callback(...); 或 _Callback(...) 包裹
-                    if "_Callback(" in cleaned:
-                        start = cleaned.index("_Callback(") + len("_Callback(")
-                        end = cleaned.rfind(")")
-                        if end > start:
-                            cleaned = cleaned[start:end]
+                    match = re.search(r'[_a-zA-Z]\w*\(([\s\S]*)\)(?:;|$)', text)
+                    if match:
+                        cleaned = match.group(1)
+                    else:
+                        cleaned = text.strip()
                     parsed = json.loads(cleaned)
                     return parsed
                 except Exception as e:

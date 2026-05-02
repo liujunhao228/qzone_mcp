@@ -1,7 +1,7 @@
 import asyncio
 
 import pytest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from qzone_mcp.api.session import QzoneSession, LoginExpiredError, CookieParseError
 from qzone_mcp.config import AppConfig
@@ -10,14 +10,31 @@ from qzone_mcp.config import AppConfig
 class TestLLOneBotIntegration:
     def _create_mock_session(self, status=200, cookies=""):
         """Helper to create a mock aiohttp session with proper async context manager support."""
-        mock_response = AsyncMock()
+        mock_response = MagicMock()
         mock_response.status = status
         mock_response.json = AsyncMock(return_value={"cookies": cookies})
+        
         mock_response.__aenter__ = AsyncMock(return_value=mock_response)
         mock_response.__aexit__ = AsyncMock(return_value=None)
         
-        mock_session = AsyncMock()
-        mock_session.get = AsyncMock(return_value=mock_response)
+        class MockResponseWrapper:
+            def __await__(self):
+                async def wrapper():
+                    return mock_response
+                return wrapper().__await__()
+            
+            async def __aenter__(self):
+                return mock_response
+            
+            async def __aexit__(self, *args, **kwargs):
+                return None
+        
+        mock_session = MagicMock()
+        
+        def mock_get(*args, **kwargs):
+            return MockResponseWrapper()
+        
+        mock_session.get = mock_get
         mock_session.__aenter__ = AsyncMock(return_value=mock_session)
         mock_session.__aexit__ = AsyncMock(return_value=None)
         
@@ -118,22 +135,28 @@ class TestLLOneBotIntegration:
         config.onebot.provider = "llonebot"
         config.onebot.host = "127.0.0.1"
         config.onebot.port = 5700
-        config.onebot.timeout = 1
+        config.onebot.timeout = 0.5
         
         session = QzoneSession(config)
         
-        mock_session = AsyncMock()
+        class TimeoutResponseWrapper:
+            def __await__(self):
+                async def wrapper():
+                    raise asyncio.TimeoutError("Request timed out")
+                return wrapper().__await__()
+            
+            async def __aenter__(self):
+                raise asyncio.TimeoutError("Request timed out")
+            
+            async def __aexit__(self, *args, **kwargs):
+                return None
         
-        async def slow_get(*args, **kwargs):
-            await asyncio.sleep(2)
-            mock_response = AsyncMock()
-            mock_response.status = 200
-            mock_response.json = AsyncMock(return_value={"cookies": "test"})
-            mock_response.__aenter__ = AsyncMock(return_value=mock_response)
-            mock_response.__aexit__ = AsyncMock(return_value=None)
-            return mock_response
+        mock_session = MagicMock()
         
-        mock_session.get = slow_get
+        def timeout_get(*args, **kwargs):
+            return TimeoutResponseWrapper()
+        
+        mock_session.get = timeout_get
         mock_session.__aenter__ = AsyncMock(return_value=mock_session)
         mock_session.__aexit__ = AsyncMock(return_value=None)
         
@@ -177,16 +200,32 @@ class TestLLOneBotIntegration:
             "message": "success"
         }
         
-        mock_session = self._create_mock_session(status=200)
-        mock_session.get = AsyncMock(return_value=AsyncMock(
-            status=200,
-            json=AsyncMock(return_value=llonebot_response),
-            __aenter__=AsyncMock(return_value=AsyncMock(
-                status=200,
-                json=AsyncMock(return_value=llonebot_response)
-            )),
-            __aexit__=AsyncMock(return_value=None)
-        ))
+        mock_response = MagicMock()
+        mock_response.status = 200
+        mock_response.json = AsyncMock(return_value=llonebot_response)
+        mock_response.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_response.__aexit__ = AsyncMock(return_value=None)
+        
+        class MockResponseWrapper:
+            def __await__(self):
+                async def wrapper():
+                    return mock_response
+                return wrapper().__await__()
+            
+            async def __aenter__(self):
+                return mock_response
+            
+            async def __aexit__(self, *args, **kwargs):
+                return None
+        
+        mock_session = MagicMock()
+        
+        def mock_get(*args, **kwargs):
+            return MockResponseWrapper()
+        
+        mock_session.get = mock_get
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
         
         with patch("aiohttp.ClientSession", return_value=mock_session):
             cookies_str = await session._fetch_from_onebot()

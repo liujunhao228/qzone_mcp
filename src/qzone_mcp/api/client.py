@@ -25,13 +25,17 @@ class QzoneClient:
 
         kwargs.setdefault("headers", {})
         kwargs["headers"].update(ctx.headers())
+        kwargs["cookies"] = ctx.cookies()
 
         try:
             async with session.request(method, url, **kwargs) as resp:
                 text = await resp.text()
                 if resp.status == 401 or (text and "登录" in text):
                     raise LoginExpiredError("登录失效")
-                return await resp.json()
+                try:
+                    return await resp.json()
+                except Exception:
+                    return text
         except LoginExpiredError:
             if retry >= self.session.cfg.qzone.max_retries:
                 raise
@@ -83,77 +87,108 @@ class QzoneClient:
 
     async def publish_post(self, text: str, image_urls: Optional[List[str]] = None) -> PublishResult:
         ctx = await self.session.get_ctx()
-        url = f"https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_publish_v6"
+        url = f"https://user.qzone.qq.com/proxy/domain/taotao.qzone.qq.com/cgi-bin/emotion_cgi_publish_v6"
 
         data = {
-            "content": text,
+            "syn_tweet_verson": "1",
+            "paramstr": "1",
+            "who": "1",
+            "con": text,
+            "feedversion": "1",
+            "ver": "1",
+            "ugc_right": "1",
+            "to_sign": "0",
+            "hostuin": ctx.uin,
+            "code_version": "1",
             "format": "json",
-            "g_tk": ctx.gtk2,
-            "uin": ctx.uin,
+            "qzreferrer": f"https://user.qzone.qq.com/{ctx.uin}",
         }
 
         if image_urls:
             data["pic_url"] = "|".join(image_urls)
 
-        resp = await self.request("POST", url, data=data)
-        if resp.get("code") == 0:
-            return PublishResult(success=True, tid=resp.get("tid"), message="发布成功")
-        return PublishResult(success=False, message=resp.get("message", "发布失败"))
+        resp = await self.request("POST", url, params={"g_tk": ctx.gtk2, "uin": ctx.uin}, data=data)
+        if isinstance(resp, dict) and resp.get("code") == 0:
+            return PublishResult(success=True, tid=str(resp.get("tid", "")), message="发布成功")
+        return PublishResult(success=False, message="发布失败")
 
     async def like_post(self, tid: str, author_uin: int) -> LikeResult:
         ctx = await self.session.get_ctx()
-        url = f"https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_like"
+        url = f"https://user.qzone.qq.com/proxy/domain/w.qzone.qq.com/cgi-bin/likes/internal_dolike_app"
 
-        params = {
-            "tid": tid,
-            "uin": author_uin,
-            "cur_uin": ctx.uin,
-            "like_num": 1,
+        data = {
+            "qzreferrer": f"https://user.qzone.qq.com/{ctx.uin}",
+            "opuin": ctx.uin,
+            "unikey": f"https://user.qzone.qq.com/{author_uin}/mood/{tid}",
+            "curkey": f"https://user.qzone.qq.com/{author_uin}/mood/{tid}",
+            "appid": 311,
+            "from": 1,
+            "typeid": 0,
+            "fid": tid,
+            "active": 0,
             "format": "json",
-            "g_tk": ctx.gtk2,
+            "fupdate": 1,
         }
 
-        resp = await self.request("GET", url, params=params)
-        if resp.get("code") == 0:
+        resp = await self.request("POST", url, params={"g_tk": ctx.gtk2}, data=data)
+        if isinstance(resp, dict) and resp.get("code") == 0:
             return LikeResult(success=True, message="点赞成功")
-        return LikeResult(success=False, message=resp.get("message", "点赞失败"))
+        return LikeResult(success=False, message="点赞失败")
 
     async def comment_post(self, tid: str, author_uin: int, content: str) -> CommentResult:
         ctx = await self.session.get_ctx()
-        url = f"https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_comment"
+        url = f"https://user.qzone.qq.com/proxy/domain/taotao.qzone.qq.com/cgi-bin/emotion_cgi_re_feeds"
 
         data = {
-            "tid": tid,
-            "uin": author_uin,
-            "cur_uin": ctx.uin,
+            "topicId": f"{author_uin}_{tid}__1",
+            "uin": ctx.uin,
+            "hostUin": author_uin,
+            "feedsType": 100,
+            "inCharset": "utf-8",
+            "outCharset": "utf-8",
+            "plat": "qzone",
+            "source": "ic",
+            "platformid": 52,
+            "format": "fs",
+            "ref": "feeds",
             "content": content,
-            "format": "json",
-            "g_tk": ctx.gtk2,
         }
 
-        resp = await self.request("POST", url, data=data)
-        if resp.get("code") == 0:
-            return CommentResult(success=True, comment_id=resp.get("commentid"), message="评论成功")
-        return CommentResult(success=False, message=resp.get("message", "评论失败"))
+        resp = await self.request("POST", url, params={"g_tk": ctx.gtk2}, data=data)
+        if isinstance(resp, dict) and (resp.get("code") == 0 or resp.get("result") == 0):
+            return CommentResult(success=True, comment_id=str(resp.get("commentId", "")), message="评论成功")
+        return CommentResult(success=False, message="评论失败")
 
     async def reply_comment(self, tid: str, author_uin: int, comment_id: str, content: str) -> CommentResult:
         ctx = await self.session.get_ctx()
-        url = f"https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_reply"
+        url = f"https://user.qzone.qq.com/proxy/domain/taotao.qzone.qq.com/cgi-bin/emotion_cgi_re_feeds"
 
         data = {
-            "tid": tid,
-            "uin": author_uin,
-            "cur_uin": ctx.uin,
+            "topicId": f"{author_uin}_{tid}__1",
+            "uin": ctx.uin,
+            "hostUin": author_uin,
+            "feedsType": 100,
+            "inCharset": "utf-8",
+            "outCharset": "utf-8",
+            "plat": "qzone",
+            "source": "ic",
+            "platformid": 52,
+            "format": "fs",
+            "ref": "feeds",
             "content": content,
-            "replyid": comment_id,
-            "format": "json",
-            "g_tk": ctx.gtk2,
+            "commentId": comment_id,
+            "commentUin": 0,
+            "richval": "",
+            "richtype": "",
+            "private": "0",
+            "paramstr": "2",
+            "qzreferrer": f"https://user.qzone.qq.com/{ctx.uin}/main",
         }
 
-        resp = await self.request("POST", url, data=data)
-        if resp.get("code") == 0:
-            return CommentResult(success=True, comment_id=resp.get("replyid"), message="回复成功")
-        return CommentResult(success=False, message=resp.get("message", "回复失败"))
+        resp = await self.request("POST", url, params={"g_tk": ctx.gtk2}, data=data)
+        if isinstance(resp, dict) and (resp.get("code") == 0 or resp.get("result") == 0):
+            return CommentResult(success=True, comment_id=str(resp.get("replyId", "")), message="回复成功")
+        return CommentResult(success=False, message="回复失败")
 
     async def get_visitors(self, page: int = 1, num: int = 20) -> List[Visitor]:
         ctx = await self.session.get_ctx()

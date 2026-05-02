@@ -24,7 +24,13 @@ def test_config_from_env():
 
 
 def test_config_defaults():
-    config = AppConfig(model_config={"env_file": None})
+    import os
+    env_vars = list(os.environ.keys())
+    for key in env_vars:
+        if key.startswith("QZONE_"):
+            del os.environ[key]
+    
+    config = AppConfig(model_config={"env_file": None, "env_prefix": "", "extra": "ignore"})
     assert config.qzone.cookie == ""
     assert config.qzone.timeout == 30
     assert config.onebot.enabled is False
@@ -35,7 +41,13 @@ def test_config_defaults():
 
 
 def test_has_valid_cookie():
-    config = AppConfig(model_config={"env_file": None})
+    import os
+    env_vars = list(os.environ.keys())
+    for key in env_vars:
+        if key.startswith("QZONE_"):
+            del os.environ[key]
+    
+    config = AppConfig(model_config={"env_file": None, "env_prefix": "", "extra": "ignore"})
     assert config.has_valid_cookie is False
     
     config.qzone.cookie = "uin=o123456; skey=abc123"

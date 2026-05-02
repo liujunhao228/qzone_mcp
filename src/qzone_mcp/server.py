@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import signal
 import sys
@@ -12,7 +13,11 @@ from mcp.types import ToolAnnotations
 
 from .api.session import QzoneSession, LoginExpiredError, CookieParseError
 from .api.client import QzoneClient
+from .api.model import Feed as FeedModel
 from .config import config
+from .db.manager import db_manager
+from .db.repository import FeedRepository, CommentRepository
+from .draft.service import DraftService
 
 logging.basicConfig(level=config.log_level)
 logger = logging.getLogger(__name__)
@@ -26,6 +31,8 @@ mcp = FastMCP(
 - 发布新说说
 - 点赞和评论说说
 - 获取访客记录
+- 本地数据库存储（持久化保存说说和评论）
+- 草稿箱功能（创建、编辑、保存、发布草稿）
 
 **使用前请确保：**
 1. 通过 qzone_set_cookie 工具设置有效的QQ空间Cookie
@@ -34,12 +41,14 @@ mcp = FastMCP(
 **注意事项：**
 - 所有操作需要有效的登录状态
 - 敏感操作（发布、点赞、评论）请谨慎使用
-- 建议先使用 qzone_login_status 检查登录状态""",
+- 建议先使用 qzone_login_status 检查登录状态
+- 数据库存储功能无需登录即可使用""",
     version="1.0.0"
 )
 
 session = QzoneSession(config)
 client = QzoneClient(session)
+draft_service = DraftService(client)
 
 shutdown_event = asyncio.Event()
 
@@ -49,6 +58,9 @@ async def cleanup_resources():
     
     await client.close()
     logger.info("HTTP 会话已关闭")
+    
+    await db_manager.close()
+    logger.info("数据库连接已关闭")
     
     logger.info("资源清理完成")
 
@@ -531,14 +543,16 @@ async def qzone_check_onebot_status() -> ToolResult:
         
         url = f"http://{onebot_cfg.host}:{onebot_cfg.port}{onebot_cfg.api_path}"
         
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=onebot_cfg.timeout)) as client:
-            async with client.get(url, params={"domain": "user.qzone.qq.com"}) as resp:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=onebot_cfg.timeout)) as client_session:
+            async with client_session.get(url, params={"domain": "user.qzone.qq.com"}) as resp:
                 result["status_code"] = resp.status
                 
                 if resp.status == 200:
                     data = await resp.json()
                     
                     if onebot_cfg.provider == "napcat":
+                        cookies_str = data.get("data", {}).get("cookies", "")
+                    elif onebot_cfg.provider == "llonebot":
                         cookies_str = data.get("data", {}).get("cookies", "")
                     else:
                         cookies_str = data.get("cookies", "")
@@ -569,7 +583,750 @@ async def qzone_check_onebot_status() -> ToolResult:
         return ToolResult(content=f"检查 OneBot 状态失败：{str(e)}")
 
 
+# ==================== 数据库相关工具 ====================
+
+@mcp.tool(
+    name="qzone_save_feed",
+    description="保存说说到本地数据库",
+    annotations=ToolAnnotations(readOnlyHint=False)
+)
+async def qzone_save_feed(
+    tid: str,
+    uin: int,
+    content: str,
+    nickname: Optional[str] = None,
+    images: Optional[str] = None,
+    likes: int = 0,
+    comments: int = 0,
+    shares: int = 0,
+    time: Optional[str] = None,
+    is_liked: bool = False
+) -> ToolResult:
+    """
+    保存说说数据到本地数据库
+    
+    Args:
+        tid: 说说ID（必填）
+        uin: 发布者QQ号（必填）
+        content: 说说内容（必填）
+        nickname: 发布者昵称
+        images: 图片URL列表（JSON格式）
+        likes: 点赞数
+        comments: 评论数
+        shares: 分享数
+        time: 发布时间
+        is_liked: 是否已点赞
+    
+    Returns:
+        保存结果
+    
+    Example:
+        {
+            "result": {
+                "success": true,
+                "message": "保存成功",
+                "tid": "123456789"
+            }
+        }
+    """
+    try:
+        if not tid or not uin or not content:
+            return ToolResult(content="参数错误：tid、uin 和 content 均为必填参数")
+        
+        await db_manager.initialize()
+        
+        feed_data = {
+            "tid": tid,
+            "uin": uin,
+            "content": content,
+            "nickname": nickname,
+            "images": images,
+            "likes": likes,
+            "comments": comments,
+            "shares": shares,
+            "time": time,
+            "is_liked": is_liked
+        }
+        
+        existing = await FeedRepository.get_by_tid(tid)
+        if existing:
+            await FeedRepository.update(tid, feed_data)
+            return ToolResult(structured_content={"result": {"success": True, "message": "更新成功", "tid": tid}})
+        
+        await FeedRepository.create(feed_data)
+        return ToolResult(structured_content={"result": {"success": True, "message": "保存成功", "tid": tid}})
+    
+    except Exception as e:
+        logger.error(f"保存说说失败: {e}")
+        return ToolResult(content=f"保存说说失败：{str(e)}")
+
+
+@mcp.tool(
+    name="qzone_save_feed_with_comments",
+    description="保存说说及评论到本地数据库",
+    annotations=ToolAnnotations(readOnlyHint=False)
+)
+async def qzone_save_feed_with_comments(
+    tid: str,
+    uin: int,
+    content: str,
+    nickname: Optional[str] = None,
+    images: Optional[str] = None,
+    likes: int = 0,
+    comments: int = 0,
+    shares: int = 0,
+    time: Optional[str] = None,
+    is_liked: bool = False,
+    comment_list: Optional[str] = None
+) -> ToolResult:
+    """
+    保存说说及其评论数据到本地数据库
+    
+    Args:
+        tid: 说说ID（必填）
+        uin: 发布者QQ号（必填）
+        content: 说说内容（必填）
+        nickname: 发布者昵称
+        images: 图片URL列表（JSON格式）
+        likes: 点赞数
+        comments: 评论数
+        shares: 分享数
+        time: 发布时间
+        is_liked: 是否已点赞
+        comment_list: 评论列表（JSON格式，包含id, uin, nickname, content, time, parent_id字段）
+    
+    Returns:
+        保存结果
+    
+    Example:
+        {
+            "result": {
+                "success": true,
+                "message": "保存成功",
+                "tid": "123456789",
+                "comment_count": 3
+            }
+        }
+    """
+    try:
+        if not tid or not uin or not content:
+            return ToolResult(content="参数错误：tid、uin 和 content 均为必填参数")
+        
+        await db_manager.initialize()
+        
+        feed_data = {
+            "tid": tid,
+            "uin": uin,
+            "content": content,
+            "nickname": nickname,
+            "images": images,
+            "likes": likes,
+            "comments": comments,
+            "shares": shares,
+            "time": time,
+            "is_liked": is_liked
+        }
+        
+        existing = await FeedRepository.get_by_tid(tid)
+        if existing:
+            await FeedRepository.update(tid, feed_data)
+        else:
+            await FeedRepository.create(feed_data)
+        
+        if comment_list:
+            try:
+                comments_data = json.loads(comment_list)
+                if isinstance(comments_data, list):
+                    for comment in comments_data:
+                        comment["tid"] = tid
+                        comment["comment_id"] = comment.get("id", comment.get("comment_id", str(comment.get("id", ""))))
+                    await CommentRepository.create_batch(comments_data)
+                    comment_count = len(comments_data)
+                else:
+                    comment_count = 0
+            except json.JSONDecodeError:
+                comment_count = 0
+        else:
+            comment_count = 0
+        
+        return ToolResult(structured_content={
+            "result": {
+                "success": True,
+                "message": "保存成功",
+                "tid": tid,
+                "comment_count": comment_count
+            }
+        })
+    
+    except Exception as e:
+        logger.error(f"保存说说及评论失败: {e}")
+        return ToolResult(content=f"保存说说及评论失败：{str(e)}")
+
+
+@mcp.tool(
+    name="qzone_get_saved_feeds",
+    description="获取本地保存的说说列表",
+    annotations=ToolAnnotations(readOnlyHint=True)
+)
+async def qzone_get_saved_feeds(
+    uin: Optional[int] = None,
+    limit: int = 20,
+    offset: int = 0
+) -> ToolResult:
+    """
+    获取本地数据库中保存的说说列表
+    
+    Args:
+        uin: 发布者QQ号（可选，不传则获取所有）
+        limit: 返回数量限制
+        offset: 偏移量
+    
+    Returns:
+        说说列表
+    
+    Example:
+        {
+            "result": [
+                {
+                    "tid": "123456789",
+                    "uin": 123456789,
+                    "nickname": "张三",
+                    "content": "今天天气真好！",
+                    "likes": 10,
+                    "comments": 3,
+                    "time": "2024-01-15 10:30"
+                }
+            ],
+            "total": 100
+        }
+    """
+    try:
+        await db_manager.initialize()
+        
+        if uin:
+            feeds = await FeedRepository.get_by_uin(uin, limit=limit, offset=offset)
+            total = await FeedRepository.count()
+        else:
+            feeds = await FeedRepository.get_all(limit=limit, offset=offset)
+            total = await FeedRepository.count()
+        
+        return ToolResult(structured_content={
+            "result": [feed.to_dict() for feed in feeds],
+            "total": total
+        })
+    
+    except Exception as e:
+        logger.error(f"获取本地说说失败: {e}")
+        return ToolResult(content=f"获取本地说说失败：{str(e)}")
+
+
+@mcp.tool(
+    name="qzone_get_saved_feed",
+    description="获取单条本地保存的说说",
+    annotations=ToolAnnotations(readOnlyHint=True)
+)
+async def qzone_get_saved_feed(tid: str) -> ToolResult:
+    """
+    根据说说ID获取本地保存的说说详情
+    
+    Args:
+        tid: 说说ID（必填）
+    
+    Returns:
+        说说详情，包含评论列表
+    
+    Example:
+        {
+            "result": {
+                "tid": "123456789",
+                "uin": 123456789,
+                "nickname": "张三",
+                "content": "今天天气真好！",
+                "comments": [
+                    {"comment_id": "c1", "uin": 987654321, "nickname": "李四", "content": "确实不错！"}
+                ]
+            }
+        }
+    """
+    try:
+        if not tid:
+            return ToolResult(content="参数错误：tid 为必填参数")
+        
+        await db_manager.initialize()
+        
+        feed = await FeedRepository.get_by_tid(tid)
+        if not feed:
+            return ToolResult(content="说说不存在")
+        
+        comments = await CommentRepository.get_by_tid(tid)
+        
+        result = feed.to_dict()
+        result["comments"] = [comment.to_dict() for comment in comments]
+        
+        return ToolResult(structured_content={"result": result})
+    
+    except Exception as e:
+        logger.error(f"获取本地说说详情失败: {e}")
+        return ToolResult(content=f"获取本地说说详情失败：{str(e)}")
+
+
+@mcp.tool(
+    name="qzone_delete_saved_feed",
+    description="删除本地保存的说说",
+    annotations=ToolAnnotations(readOnlyHint=False)
+)
+async def qzone_delete_saved_feed(tid: str) -> ToolResult:
+    """
+    删除本地数据库中保存的说说（级联删除关联评论）
+    
+    Args:
+        tid: 说说ID（必填）
+    
+    Returns:
+        删除结果
+    
+    Example:
+        {
+            "result": {
+                "success": true,
+                "message": "删除成功"
+            }
+        }
+    """
+    try:
+        if not tid:
+            return ToolResult(content="参数错误：tid 为必填参数")
+        
+        await db_manager.initialize()
+        
+        success = await FeedRepository.delete(tid)
+        
+        if success:
+            return ToolResult(structured_content={"result": {"success": True, "message": "删除成功"}})
+        else:
+            return ToolResult(content="说说不存在")
+    
+    except Exception as e:
+        logger.error(f"删除本地说说失败: {e}")
+        return ToolResult(content=f"删除本地说说失败：{str(e)}")
+
+
+@mcp.tool(
+    name="qzone_get_saved_feed_count",
+    description="获取本地保存的说说数量",
+    annotations=ToolAnnotations(readOnlyHint=True)
+)
+async def qzone_get_saved_feed_count() -> ToolResult:
+    """
+    获取本地数据库中保存的说说总数
+    
+    Returns:
+        说说数量
+    
+    Example:
+        {
+            "result": {
+                "count": 100
+            }
+        }
+    """
+    try:
+        await db_manager.initialize()
+        
+        count = await FeedRepository.count()
+        
+        return ToolResult(structured_content={"result": {"count": count}})
+    
+    except Exception as e:
+        logger.error(f"获取说说数量失败: {e}")
+        return ToolResult(content=f"获取说说数量失败：{str(e)}")
+
+
+# ==================== 草稿箱相关工具 ====================
+
+@mcp.tool(
+    name="qzone_create_draft",
+    description="创建新草稿",
+    annotations=ToolAnnotations(readOnlyHint=False)
+)
+async def qzone_create_draft(
+    content: str,
+    title: Optional[str] = None,
+    images: Optional[str] = None
+) -> ToolResult:
+    """
+    创建新的说说草稿
+    
+    Args:
+        content: 草稿内容（必填）
+        title: 草稿标题（可选）
+        images: 图片URL列表（JSON格式，可选）
+    
+    Returns:
+        草稿信息
+    
+    Example:
+        {
+            "result": {
+                "id": "550e8400-e29b-41d4-a716-446655440000",
+                "title": "我的草稿",
+                "content": "今天天气真好！",
+                "status": "draft",
+                "created_at": "2024-01-15T10:30:00"
+            }
+        }
+    """
+    try:
+        if not content or not content.strip():
+            return ToolResult(content="参数错误：草稿内容不能为空")
+        
+        await db_manager.initialize()
+        
+        images_list = None
+        if images:
+            try:
+                images_list = json.loads(images)
+                if not isinstance(images_list, list):
+                    images_list = None
+            except json.JSONDecodeError:
+                images_list = None
+        
+        draft = await draft_service.create_draft(content.strip(), title, images_list)
+        
+        return ToolResult(structured_content={"result": draft})
+    
+    except Exception as e:
+        logger.error(f"创建草稿失败: {e}")
+        return ToolResult(content=f"创建草稿失败：{str(e)}")
+
+
+@mcp.tool(
+    name="qzone_update_draft",
+    description="更新草稿内容",
+    annotations=ToolAnnotations(readOnlyHint=False)
+)
+async def qzone_update_draft(
+    draft_id: str,
+    content: Optional[str] = None,
+    title: Optional[str] = None,
+    images: Optional[str] = None
+) -> ToolResult:
+    """
+    更新现有草稿的内容
+    
+    Args:
+        draft_id: 草稿ID（必填）
+        content: 新内容（可选）
+        title: 新标题（可选）
+        images: 新图片URL列表（JSON格式，可选）
+    
+    Returns:
+        更新后的草稿信息
+    
+    Example:
+        {
+            "result": {
+                "id": "550e8400-e29b-41d4-a716-446655440000",
+                "title": "修改后的标题",
+                "content": "修改后的内容",
+                "updated_at": "2024-01-15T10:35:00"
+            }
+        }
+    """
+    try:
+        if not draft_id:
+            return ToolResult(content="参数错误：draft_id 为必填参数")
+        
+        if content is None and title is None and images is None:
+            return ToolResult(content="参数错误：至少需要提供 content、title 或 images 中的一个")
+        
+        await db_manager.initialize()
+        
+        images_list = None
+        if images is not None:
+            try:
+                images_list = json.loads(images)
+                if not isinstance(images_list, list):
+                    images_list = None
+            except json.JSONDecodeError:
+                images_list = None
+        
+        draft = await draft_service.update_draft(draft_id, content, title, images_list)
+        
+        if draft:
+            return ToolResult(structured_content={"result": draft})
+        else:
+            return ToolResult(content="草稿不存在")
+    
+    except Exception as e:
+        logger.error(f"更新草稿失败: {e}")
+        return ToolResult(content=f"更新草稿失败：{str(e)}")
+
+
+@mcp.tool(
+    name="qzone_get_draft",
+    description="获取草稿详情",
+    annotations=ToolAnnotations(readOnlyHint=True)
+)
+async def qzone_get_draft(draft_id: str) -> ToolResult:
+    """
+    获取指定草稿的详细信息
+    
+    Args:
+        draft_id: 草稿ID（必填）
+    
+    Returns:
+        草稿详情
+    
+    Example:
+        {
+            "result": {
+                "id": "550e8400-e29b-41d4-a716-446655440000",
+                "title": "我的草稿",
+                "content": "今天天气真好！",
+                "images": ["https://example.com/img.jpg"],
+                "status": "draft",
+                "created_at": "2024-01-15T10:30:00",
+                "updated_at": "2024-01-15T10:30:00"
+            }
+        }
+    """
+    try:
+        if not draft_id:
+            return ToolResult(content="参数错误：draft_id 为必填参数")
+        
+        await db_manager.initialize()
+        
+        draft = await draft_service.get_draft(draft_id)
+        
+        if draft:
+            return ToolResult(structured_content={"result": draft})
+        else:
+            return ToolResult(content="草稿不存在")
+    
+    except Exception as e:
+        logger.error(f"获取草稿失败: {e}")
+        return ToolResult(content=f"获取草稿失败：{str(e)}")
+
+
+@mcp.tool(
+    name="qzone_get_drafts",
+    description="获取草稿列表",
+    annotations=ToolAnnotations(readOnlyHint=True)
+)
+async def qzone_get_drafts(
+    status: Optional[str] = None,
+    limit: int = 20,
+    offset: int = 0
+) -> ToolResult:
+    """
+    获取草稿列表
+    
+    Args:
+        status: 状态过滤（可选），可选值：draft/published/deleted
+        limit: 返回数量限制
+        offset: 偏移量
+    
+    Returns:
+        草稿列表
+    
+    Example:
+        {
+            "result": [
+                {
+                    "id": "550e8400-e29b-41d4-a716-446655440000",
+                    "title": "我的草稿",
+                    "content": "今天天气真好！",
+                    "status": "draft"
+                }
+            ],
+            "total": 5
+        }
+    """
+    try:
+        await db_manager.initialize()
+        
+        drafts = await draft_service.get_drafts(status=status, limit=limit, offset=offset)
+        total = await draft_service.get_draft_count(status=status)
+        
+        return ToolResult(structured_content={"result": drafts, "total": total})
+    
+    except Exception as e:
+        logger.error(f"获取草稿列表失败: {e}")
+        return ToolResult(content=f"获取草稿列表失败：{str(e)}")
+
+
+@mcp.tool(
+    name="qzone_delete_draft",
+    description="删除草稿",
+    annotations=ToolAnnotations(readOnlyHint=False)
+)
+async def qzone_delete_draft(
+    draft_id: str,
+    hard_delete: bool = False
+) -> ToolResult:
+    """
+    删除草稿（默认软删除，可选择硬删除）
+    
+    Args:
+        draft_id: 草稿ID（必填）
+        hard_delete: 是否硬删除（可选，默认False即软删除）
+    
+    Returns:
+        删除结果
+    
+    Example:
+        {
+            "result": {
+                "success": true,
+                "message": "删除成功"
+            }
+        }
+    """
+    try:
+        if not draft_id:
+            return ToolResult(content="参数错误：draft_id 为必填参数")
+        
+        await db_manager.initialize()
+        
+        success = await draft_service.delete_draft(draft_id, hard_delete)
+        
+        if success:
+            return ToolResult(structured_content={"result": {"success": True, "message": "删除成功"}})
+        else:
+            return ToolResult(content="草稿不存在")
+    
+    except Exception as e:
+        logger.error(f"删除草稿失败: {e}")
+        return ToolResult(content=f"删除草稿失败：{str(e)}")
+
+
+@mcp.tool(
+    name="qzone_preview_draft",
+    description="预览草稿",
+    annotations=ToolAnnotations(readOnlyHint=True)
+)
+async def qzone_preview_draft(draft_id: str) -> ToolResult:
+    """
+    预览草稿内容（包含内容预览、长度统计等）
+    
+    Args:
+        draft_id: 草稿ID（必填）
+    
+    Returns:
+        草稿预览信息
+    
+    Example:
+        {
+            "result": {
+                "draft_id": "550e8400-e29b-41d4-a716-446655440000",
+                "title": "我的草稿",
+                "content_preview": "今天天气真好！",
+                "content_length": 8,
+                "image_count": 0,
+                "created_at": "2024-01-15T10:30:00",
+                "updated_at": "2024-01-15T10:30:00",
+                "status": "draft"
+            }
+        }
+    """
+    try:
+        if not draft_id:
+            return ToolResult(content="参数错误：draft_id 为必填参数")
+        
+        await db_manager.initialize()
+        
+        preview = await draft_service.preview_draft(draft_id)
+        
+        if preview:
+            return ToolResult(structured_content={"result": preview})
+        else:
+            return ToolResult(content="草稿不存在")
+    
+    except Exception as e:
+        logger.error(f"预览草稿失败: {e}")
+        return ToolResult(content=f"预览草稿失败：{str(e)}")
+
+
+@mcp.tool(
+    name="qzone_publish_draft",
+    description="发布草稿为说说",
+    annotations=ToolAnnotations(readOnlyHint=False)
+)
+async def qzone_publish_draft(draft_id: str) -> ToolResult:
+    """
+    将草稿发布为QQ空间说说
+    
+    Args:
+        draft_id: 草稿ID（必填）
+    
+    Returns:
+        发布结果
+    
+    Example:
+        {
+            "result": {
+                "success": true,
+                "tid": "123456789",
+                "message": "发布成功"
+            }
+        }
+    """
+    try:
+        if not draft_id:
+            return ToolResult(content="参数错误：draft_id 为必填参数")
+        
+        await db_manager.initialize()
+        
+        result = await draft_service.publish_draft(draft_id)
+        
+        return ToolResult(structured_content={"result": result})
+    
+    except LoginExpiredError:
+        return ToolResult(content="登录失效，请使用 qzone_set_cookie 工具重新设置Cookie")
+    except Exception as e:
+        logger.error(f"发布草稿失败: {e}")
+        return ToolResult(content=f"发布草稿失败：{str(e)}")
+
+
+@mcp.tool(
+    name="qzone_get_draft_count",
+    description="获取草稿数量",
+    annotations=ToolAnnotations(readOnlyHint=True)
+)
+async def qzone_get_draft_count(status: Optional[str] = None) -> ToolResult:
+    """
+    获取草稿数量
+    
+    Args:
+        status: 状态过滤（可选），可选值：draft/published/deleted
+    
+    Returns:
+        草稿数量
+    
+    Example:
+        {
+            "result": {
+                "count": 5
+            }
+        }
+    """
+    try:
+        await db_manager.initialize()
+        
+        count = await draft_service.get_draft_count(status=status)
+        
+        return ToolResult(structured_content={"result": {"count": count}})
+    
+    except Exception as e:
+        logger.error(f"获取草稿数量失败: {e}")
+        return ToolResult(content=f"获取草稿数量失败：{str(e)}")
+
+
 async def run_server():
+    await db_manager.initialize()
+    logger.info("数据库初始化完成")
+    
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     

@@ -63,7 +63,7 @@ class QzoneSession:
                 if cfg.provider == "napcat":
                     cookies_str = data.get("data", {}).get("cookies", "")
                 elif cfg.provider == "llonebot":
-                    cookies_str = data.get("cookies", "")
+                    cookies_str = data.get("data", {}).get("cookies", "")
                 else:
                     cookies_str = data.get("cookies", "") or data.get("data", "")
                 

@@ -15,3 +15,4 @@ build/
 *.log
 .trae/
 *.db
+src/.qzone/

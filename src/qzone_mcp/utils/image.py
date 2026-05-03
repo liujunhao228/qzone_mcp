@@ -1,6 +1,7 @@
 from typing import Optional, List
 import base64
 import logging
+import os
 
 import aiohttp
 
@@ -18,6 +19,21 @@ async def download_file(url: str) -> Optional[bytes]:
         return None
 
 
+def is_url(path: str) -> bool:
+    return path.lower().startswith("http://") or path.lower().startswith("https://")
+
+
+def read_local_file(file_path: str) -> Optional[bytes]:
+    try:
+        file_path = file_path.replace("%5C", "\\")
+        file_path = file_path.replace("%2F", "/")
+        with open(file_path, "rb") as f:
+            return f.read()
+    except Exception as e:
+        logger.error(f"读取本地文件失败: {e}")
+        return None
+
+
 async def normalize_images(images: Optional[List[bytes | str]]) -> List[bytes]:
     if not images:
         return []
@@ -27,7 +43,10 @@ async def normalize_images(images: Optional[List[bytes | str]]) -> List[bytes]:
         if isinstance(item, bytes):
             cleaned.append(item)
         elif isinstance(item, str):
-            file = await download_file(item)
+            if is_url(item):
+                file = await download_file(item)
+            else:
+                file = read_local_file(item)
             if file:
                 cleaned.append(file)
         else:

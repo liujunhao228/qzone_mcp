@@ -4,16 +4,15 @@ import re
 from typing import Any, Tuple, List
 
 import json5
-from bs4 import BeautifulSoup
 
-from .constants import (
+from ..api.constants import (
     QZONE_CODE_UNKNOWN,
     QZONE_MSG_EMPTY_RESPONSE,
     QZONE_MSG_INVALID_RESPONSE,
     QZONE_MSG_JSON_PARSE_ERROR,
     QZONE_MSG_NON_OBJECT_RESPONSE,
 )
-from .model import Feed, FeedImage, FeedComment
+from ..model import Feed, FeedImage, FeedComment, Visitor
 
 
 def _safe_cell(text: str, max_len: int = 30) -> str:
@@ -26,7 +25,7 @@ def _safe_cell(text: str, max_len: int = 30) -> str:
     return text or "-"
 
 
-class QzoneParser:
+class QzoneJsonParser:
     @staticmethod
     def _error_payload(message: str) -> dict[str, Any]:
         return {"code": QZONE_CODE_UNKNOWN, "message": message, "data": {}}
@@ -39,7 +38,7 @@ class QzoneParser:
             logger.debug(f"响应数据: {text}")
 
         if not text or not text.strip():
-            return QzoneParser._error_payload(QZONE_MSG_EMPTY_RESPONSE)
+            return QzoneJsonParser._error_payload(QZONE_MSG_EMPTY_RESPONSE)
 
         if m := re.search(
             r"callback\s*\(\s*([^{]*(\{.*\})[^)]*)\s*\)",
@@ -51,7 +50,7 @@ class QzoneParser:
             start = text.find("{")
             end = text.rfind("}")
             if start == -1 or end == -1 or end < start:
-                return QzoneParser._error_payload(QZONE_MSG_INVALID_RESPONSE)
+                return QzoneJsonParser._error_payload(QZONE_MSG_INVALID_RESPONSE)
             json_str = text[start : end + 1]
 
         json_str = json_str.replace("undefined", "null").strip()
@@ -62,13 +61,13 @@ class QzoneParser:
             import logging
             logger = logging.getLogger(__name__)
             logger.error(f"JSON 解析错误: {e}")
-            return QzoneParser._error_payload(QZONE_MSG_JSON_PARSE_ERROR)
+            return QzoneJsonParser._error_payload(QZONE_MSG_JSON_PARSE_ERROR)
 
         if not isinstance(data, dict):
             import logging
             logger = logging.getLogger(__name__)
             logger.error("JSON 解析结果不是 dict")
-            return QzoneParser._error_payload(QZONE_MSG_NON_OBJECT_RESPONSE)
+            return QzoneJsonParser._error_payload(QZONE_MSG_NON_OBJECT_RESPONSE)
 
         if debug:
             import logging
@@ -188,11 +187,15 @@ class QzoneParser:
                             image_urls.append(raw)
                             break
 
+            video_urls: List[str] = []
             for video in msg.get("video") or []:
                 if isinstance(video, dict):
                     video_image_url = video.get("url1") or video.get("pic_url")
                     if video_image_url:
                         image_urls.append(video_image_url)
+                    url3 = video.get("url3")
+                    if url3:
+                        video_urls.append(url3)
 
             rt_con = msg.get("rt_con", {}).get("content", "")
             if isinstance(rt_con, dict):
@@ -226,6 +229,8 @@ class QzoneParser:
                 time=str(msg.get("created_time", "")),
                 comment_list=comment_list,
                 is_liked=msg.get("isliked", 0) == 1,
+                videos=video_urls,
+                rt_con=rt_con,
             )
             posts.append(post)
 

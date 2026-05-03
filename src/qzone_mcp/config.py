@@ -30,6 +30,7 @@ class OneBotConfig(BaseModel):
     port: int = Field(default=3000, description="OneBot HTTP API 端口")
     timeout: int = Field(default=10, description="请求超时时间(秒)")
     api_path: str = Field(default="/get_cookies", description="获取 cookie 的 API 路径")
+    token: Optional[str] = Field(default=None, description="Bearer token，用于身份验证")
 
 
 class QzoneConfig(BaseModel):
@@ -40,7 +41,7 @@ class QzoneConfig(BaseModel):
 
 
 class LogConfig(BaseModel):
-    level: str = Field(default="DEBUG", description="日志级别: DEBUG/INFO/WARN/ERROR/FATAL")
+    level: str = Field(default="INFO", description="日志级别: DEBUG/INFO/WARN/ERROR/FATAL")
     path: Path = Field(default=Path.home() / ".qzone" / "logs", description="日志存储目录")
     max_size: int = Field(default=10485760, description="单文件最大字节数(默认10MB)")
     backup_count: int = Field(default=5, description="保留的日志备份数")

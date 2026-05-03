@@ -3,46 +3,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from qzone_mcp.api.client import QzoneClient
-from qzone_mcp.api.session import QzoneSession
-from qzone_mcp.api.model import QzoneContext
+from qzone_mcp.api.legacy_api import QzoneClient, PublishResult
+from qzone_mcp.session import QzoneSession
+from qzone_mcp.model import QzoneContext, ApiResponse
 from qzone_mcp.config import AppConfig
 
 
 class TestQzoneClient:
-    def _create_mock_session(self, status=200, json_data=None, text_data=""):
-        mock_response = MagicMock()
-        mock_response.status = status
-        mock_response.json = AsyncMock(return_value=json_data or {})
-        mock_response.text = AsyncMock(return_value=text_data)
-        mock_response.__aenter__ = AsyncMock(return_value=mock_response)
-        mock_response.__aexit__ = AsyncMock(return_value=None)
-
-        class MockResponseWrapper:
-            def __await__(self):
-                async def wrapper():
-                    return mock_response
-                return wrapper().__await__()
-
-            async def __aenter__(self):
-                return mock_response
-
-            async def __aexit__(self, *args, **kwargs):
-                return None
-
-        mock_session = MagicMock()
-
-        def mock_get(*args, **kwargs):
-            return MockResponseWrapper()
-
-        mock_session.get = mock_get
-        mock_session.post = mock_get
-        mock_session.request = mock_get
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock(return_value=None)
-
-        return mock_session
-
     @pytest.mark.asyncio
     async def test_publish_post_params(self):
         config = AppConfig()
@@ -50,21 +17,21 @@ class TestQzoneClient:
         config.qzone.cookie = "uin=o123456789; skey=test_skey; p_skey=test_p_skey"
 
         session = QzoneSession(config)
-        ctx = await session.login(config.qzone.cookie)
+        await session.login(config.qzone.cookie)
 
         client = QzoneClient(session)
 
-        mock_session = self._create_mock_session(
-            status=200,
-            json_data={"code": 0, "tid": "123456"}
-        )
+        mock_api = MagicMock()
+        mock_api.publish = AsyncMock(return_value=ApiResponse(
+            ok=True, code=0, data={"tid": "123456"}, raw={"code": 0, "tid": "123456"}
+        ))
+        client._api = mock_api
 
-        with patch("aiohttp.ClientSession", return_value=mock_session):
-            result = await client.publish_post("test content")
+        result = await client.publish_post("test content")
 
-            assert result.success is True
-            assert result.tid == "123456"
-            assert result.message == "发布成功"
+        assert result.success is True
+        assert result.tid == "123456"
+        assert result.message == "发布成功"
 
     @pytest.mark.asyncio
     async def test_publish_post_failure(self):
@@ -77,16 +44,16 @@ class TestQzoneClient:
 
         client = QzoneClient(session)
 
-        mock_session = self._create_mock_session(
-            status=200,
-            json_data={"code": -1, "message": "发布失败"}
-        )
+        mock_api = MagicMock()
+        mock_api.publish = AsyncMock(return_value=ApiResponse(
+            ok=False, code=-1, message="发布失败", raw={"code": -1, "message": "发布失败"}
+        ))
+        client._api = mock_api
 
-        with patch("aiohttp.ClientSession", return_value=mock_session):
-            result = await client.publish_post("test content")
+        result = await client.publish_post("test content")
 
-            assert result.success is False
-            assert result.message == "发布失败"
+        assert result.success is False
+        assert result.message == "发布失败"
 
     @pytest.mark.asyncio
     async def test_like_post(self):
@@ -99,16 +66,16 @@ class TestQzoneClient:
 
         client = QzoneClient(session)
 
-        mock_session = self._create_mock_session(
-            status=200,
-            json_data={"code": 0}
-        )
+        mock_api = MagicMock()
+        mock_api.like = AsyncMock(return_value=ApiResponse(
+            ok=True, code=0, raw={"code": 0}
+        ))
+        client._api = mock_api
 
-        with patch("aiohttp.ClientSession", return_value=mock_session):
-            result = await client.like_post("123456", 123456789)
+        result = await client.like_post("123456", 123456789)
 
-            assert result.success is True
-            assert result.message == "点赞成功"
+        assert result.success is True
+        assert result.message == "点赞成功"
 
     @pytest.mark.asyncio
     async def test_comment_post(self):
@@ -121,14 +88,14 @@ class TestQzoneClient:
 
         client = QzoneClient(session)
 
-        mock_session = self._create_mock_session(
-            status=200,
-            json_data={"code": 0, "commentId": "789012"}
-        )
+        mock_api = MagicMock()
+        mock_api.comment = AsyncMock(return_value=ApiResponse(
+            ok=True, code=0, data={"commentId": "789012"}, raw={"code": 0, "commentId": "789012"}
+        ))
+        client._api = mock_api
 
-        with patch("aiohttp.ClientSession", return_value=mock_session):
-            result = await client.comment_post("123456", "test comment")
+        result = await client.comment_post("123456", 123456789, "test comment")
 
-            assert result.success is True
-            assert result.comment_id == "789012"
-            assert result.message == "评论成功"
+        assert result.success is True
+        assert result.comment_id == "789012"
+        assert result.message == "评论成功"

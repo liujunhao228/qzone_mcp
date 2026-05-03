@@ -2,10 +2,9 @@ import asyncio
 import re
 from typing import Optional
 
-import aiohttp
-
 from ..config import config, AppConfig
-from .model import QzoneContext
+from ..model import QzoneContext
+from .provider import create_provider
 
 
 class LoginExpiredError(Exception):
@@ -23,6 +22,7 @@ class QzoneSession:
         self.cfg = cfg
         self._ctx: Optional[QzoneContext] = None
         self._lock = asyncio.Lock()
+        self._provider = create_provider(cfg) if cfg.onebot.enabled else None
 
     async def get_ctx(self) -> QzoneContext:
         async with self._lock:
@@ -33,8 +33,8 @@ class QzoneSession:
     async def login(self, cookies_str: Optional[str] = None) -> QzoneContext:
         if cookies_str:
             ctx = await self._parse_cookies(cookies_str)
-        elif self.cfg.onebot.enabled:
-            cookies_str = await self._fetch_from_onebot()
+        elif self.cfg.onebot.enabled and self._provider:
+            cookies_str = await self._provider.fetch_cookies(self.DOMAIN)
             ctx = await self._parse_cookies(cookies_str)
             self.cfg.qzone.cookie = cookies_str
         elif self.cfg.has_valid_cookie:
@@ -47,29 +47,6 @@ class QzoneSession:
 
     async def invalidate(self) -> None:
         self._ctx = None
-
-    async def _fetch_from_onebot(self) -> str:
-        cfg = self.cfg.onebot
-        url = f"http://{cfg.host}:{cfg.port}{cfg.api_path}"
-        
-        params = {"domain": self.DOMAIN}
-        
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=cfg.timeout)) as session:
-            async with session.get(url, params=params) as resp:
-                if resp.status != 200:
-                    raise RuntimeError(f"从 {cfg.provider} 获取 cookie 失败: {resp.status}")
-                data = await resp.json()
-                
-                if cfg.provider == "napcat":
-                    cookies_str = data.get("data", {}).get("cookies", "")
-                elif cfg.provider == "llonebot":
-                    cookies_str = data.get("data", {}).get("cookies", "")
-                else:
-                    cookies_str = data.get("cookies", "") or data.get("data", "")
-                
-                if not cookies_str:
-                    raise RuntimeError(f"{cfg.provider} 返回的 cookie 为空")
-                return cookies_str
 
     async def _parse_cookies(self, cookies_str: str) -> QzoneContext:
         uin_match = re.search(r'(?:^|;)\s*uin=o?(\d+)', cookies_str)

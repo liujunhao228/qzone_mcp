@@ -2,7 +2,7 @@ import json
 import uuid
 from typing import Optional, List, Dict, Any
 
-from ..api.client import QzoneClient
+from ..api.legacy_api import QzoneClient
 from ..db.repository import DraftRepository, FeedRepository
 
 

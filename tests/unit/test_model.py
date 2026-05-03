@@ -1,7 +1,7 @@
 import pytest
 
-from qzone_mcp.api.model import ApiResponse
-from qzone_mcp.api.constants import QZONE_CODE_OK, QZONE_CODE_UNKNOWN
+from qzone_mcp.model import ApiResponse
+from qzone_mcp.model.constants import QZONE_CODE_OK, QZONE_CODE_UNKNOWN
 
 
 class TestApiResponse:
@@ -11,7 +11,7 @@ class TestApiResponse:
         assert response.ok is True
         assert response.code == 0
         assert response.message is None
-        assert response.data["result"] == "success"
+        assert response.data["data"]["result"] == "success"
 
     def test_from_raw_failure(self):
         raw = {"code": -1, "message": "error occurred"}
@@ -54,7 +54,7 @@ class TestApiResponse:
         dumped = response.model_dump()
         assert dumped["ok"] is True
         assert dumped["code"] == 0
-        assert dumped["data"]["test"] == "value"
+        assert dumped["data"]["data"]["test"] == "value"
 
     def test_model_copy(self):
         response = ApiResponse(ok=True, code=0, message=None, data={"a": 1}, raw={})

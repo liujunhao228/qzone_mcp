@@ -11,9 +11,8 @@ from fastmcp import FastMCP
 from fastmcp.tools.base import ToolResult
 from mcp.types import ToolAnnotations
 
-from .api.session import QzoneSession, LoginExpiredError, CookieParseError
-from .api.client import QzoneClient
-from .api.model import Feed as FeedModel
+from .session import QzoneSession, LoginExpiredError, CookieParseError
+from .api.legacy_api import QzoneClient
 from .config import config
 from .db.manager import db_manager
 from .db.repository import FeedRepository, CommentRepository
@@ -29,9 +28,12 @@ mcp = FastMCP(
 
 **功能特性：**
 - 获取说说列表和详情
-- 发布新说说
+- 发布新说说（支持图片）
+- 删除说说
 - 点赞和评论说说
+- 回复评论
 - 获取访客记录
+- 获取好友动态（好友空间说说）
 - 本地数据库存储（持久化保存说说和评论）
 - 草稿箱功能（创建、编辑、保存、发布草稿）
 
@@ -41,7 +43,7 @@ mcp = FastMCP(
 
 **注意事项：**
 - 所有操作需要有效的登录状态
-- 敏感操作（发布、点赞、评论）请谨慎使用
+- 敏感操作（发布、删除、点赞、评论）请谨慎使用
 - 建议先使用 qzone_login_status 检查登录状态
 - 数据库存储功能无需登录即可使用""",
     version="1.0.0"
@@ -371,6 +373,95 @@ async def qzone_reply_comment(
 
 
 @mcp.tool(
+    name="qzone_delete_post",
+    description="删除说说",
+    annotations=ToolAnnotations(readOnlyHint=False)
+)
+async def qzone_delete_post(
+    tid: str
+) -> ToolResult:
+    """
+    删除指定的说说
+    
+    Args:
+        tid: 说说ID（必填）
+    
+    Returns:
+        删除结果
+    
+    Example:
+        {
+            "result": {
+                "success": true,
+                "message": "删除成功"
+            }
+        }
+    """
+    try:
+        if not tid:
+            return ToolResult(content="参数错误：tid 为必填参数")
+        
+        result = await client.delete_post(tid)
+        if result.success:
+            return ToolResult(structured_content={"result": result.model_dump()})
+        return ToolResult(content=f"删除失败：{result.message}")
+    except LoginExpiredError:
+        return ToolResult(content="登录失效，请使用 qzone_set_cookie 工具重新设置Cookie")
+    except ValueError as e:
+        return ToolResult(content=f"参数错误：{str(e)}")
+    except Exception as e:
+        logger.error(f"删除说说失败: {e}")
+        return ToolResult(content=f"删除说说失败：{str(e)}")
+
+
+@mcp.tool(
+    name="qzone_get_friend_feeds",
+    description="获取好友动态",
+    annotations=ToolAnnotations(readOnlyHint=True)
+)
+async def qzone_get_friend_feeds(
+    pos: int = 0,
+    num: int = 5
+) -> ToolResult:
+    """
+    获取好友空间动态（通过HTML解析方式）
+    
+    Args:
+        pos: 起始位置，用于分页，从0开始
+        num: 获取数量，建议不超过20
+    
+    Returns:
+        好友动态列表
+    
+    Example:
+        {
+            "result": [
+                {
+                    "tid": "123456789",
+                    "uin": 987654321,
+                    "nickname": "李四",
+                    "content": "今天出去玩了！",
+                    "time": "2024-01-15 14:30"
+                }
+            ]
+        }
+    """
+    try:
+        if num < 1 or num > 50:
+            return ToolResult(content="参数错误：num 必须在 1-50 之间")
+        
+        feeds = await client.get_friend_feeds(pos, num)
+        return ToolResult(structured_content={"result": [f.model_dump() for f in feeds]})
+    except LoginExpiredError:
+        return ToolResult(content="登录失效，请使用 qzone_set_cookie 工具重新设置Cookie")
+    except ValueError as e:
+        return ToolResult(content=f"参数错误：{str(e)}")
+    except Exception as e:
+        logger.error(f"获取好友动态失败: {e}")
+        return ToolResult(content=f"获取好友动态失败：{str(e)}")
+
+
+@mcp.tool(
     name="qzone_get_visitors",
     description="获取访客记录",
     annotations=ToolAnnotations(readOnlyHint=True)
@@ -508,6 +599,7 @@ async def qzone_check_onebot_status() -> ToolResult:
                 "host": "127.0.0.1",
                 "port": 5700,
                 "has_cookies": true,
+                "token_enabled": true,
                 "message": "连接成功，已获取Cookie"
             }
         }
@@ -520,6 +612,7 @@ async def qzone_check_onebot_status() -> ToolResult:
             "provider": onebot_cfg.provider,
             "host": onebot_cfg.host,
             "port": onebot_cfg.port,
+            "token_enabled": bool(onebot_cfg.token),
             "connected": False,
             "has_cookies": False,
             "status_code": None,
@@ -532,8 +625,12 @@ async def qzone_check_onebot_status() -> ToolResult:
         
         url = f"http://{onebot_cfg.host}:{onebot_cfg.port}{onebot_cfg.api_path}"
         
+        headers = {}
+        if onebot_cfg.token:
+            headers["Authorization"] = f"Bearer {onebot_cfg.token}"
+        
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=onebot_cfg.timeout)) as client_session:
-            async with client_session.get(url, params={"domain": "user.qzone.qq.com"}) as resp:
+            async with client_session.get(url, params={"domain": "user.qzone.qq.com"}, headers=headers) as resp:
                 result["status_code"] = resp.status
                 
                 if resp.status == 200:
@@ -561,6 +658,7 @@ async def qzone_check_onebot_status() -> ToolResult:
                 "provider": config.onebot.provider,
                 "host": config.onebot.host,
                 "port": config.onebot.port,
+                "token_enabled": bool(config.onebot.token),
                 "connected": False,
                 "has_cookies": False,
                 "status_code": None,

@@ -3,13 +3,12 @@ import asyncio
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from qzone_mcp.api.session import QzoneSession, LoginExpiredError, CookieParseError
+from qzone_mcp.session import QzoneSession, LoginExpiredError, CookieParseError
 from qzone_mcp.config import AppConfig
 
 
 class TestLLOneBotIntegration:
     def _create_mock_session(self, status=200, cookies=""):
-        """Helper to create a mock aiohttp session with proper async context manager support."""
         mock_response = MagicMock()
         mock_response.status = status
         mock_response.json = AsyncMock(return_value={"cookies": cookies})

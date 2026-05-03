@@ -1,0 +1,3 @@
+QZONE_CODE_OK = 0
+QZONE_CODE_UNKNOWN = -1
+QZONE_INTERNAL_META_KEY = "__qzone_internal__"

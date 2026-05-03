@@ -1,6 +1,6 @@
 import pytest
 
-from qzone_mcp.api.session import QzoneSession, CookieParseError
+from qzone_mcp.session import QzoneSession, CookieParseError
 from qzone_mcp.config import AppConfig
 
 

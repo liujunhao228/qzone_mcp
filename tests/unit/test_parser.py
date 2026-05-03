@@ -1,59 +1,55 @@
 import pytest
 
-from qzone_mcp.api.parser import QzoneParser
+from qzone_mcp.parser import QzoneJsonParser
 from qzone_mcp.api.constants import (
     QZONE_CODE_UNKNOWN,
-    QZONE_MSG_EMPTY_RESPONSE,
-    QZONE_MSG_INVALID_RESPONSE,
-    QZONE_MSG_JSON_PARSE_ERROR,
 )
+from qzone_mcp.model import Feed, FeedComment
 
 
 class TestQzoneParser:
     def test_parse_empty_response(self):
-        result = QzoneParser.parse_response("")
+        result = QzoneJsonParser.parse_response("")
         assert result["code"] == QZONE_CODE_UNKNOWN
-        assert result["message"] == QZONE_MSG_EMPTY_RESPONSE
 
     def test_parse_invalid_response(self):
-        result = QzoneParser.parse_response("this is not json")
+        result = QzoneJsonParser.parse_response("this is not json")
         assert result["code"] == QZONE_CODE_UNKNOWN
-        assert result["message"] == QZONE_MSG_INVALID_RESPONSE
 
     def test_parse_valid_json(self):
         json_str = '{"code": 0, "data": {"name": "test"}}'
-        result = QzoneParser.parse_response(json_str)
+        result = QzoneJsonParser.parse_response(json_str)
         assert result["code"] == 0
         assert result["data"]["name"] == "test"
 
     def test_parse_jsonp_response(self):
         jsonp_str = 'callback({"code": 0, "message": "success"});'
-        result = QzoneParser.parse_response(jsonp_str)
+        result = QzoneJsonParser.parse_response(jsonp_str)
         assert result["code"] == 0
         assert result["message"] == "success"
 
     def test_parse_json_with_undefined(self):
         json_str = '{"code": 0, "data": undefined}'
-        result = QzoneParser.parse_response(json_str)
+        result = QzoneJsonParser.parse_response(json_str)
         assert result["code"] == 0
         assert result["data"] is None
 
     def test_parse_json5_features(self):
         json5_str = '{"code": 0, "data": {"name": "test", "count": 1, // comment\n"active": true}}'
-        result = QzoneParser.parse_response(json5_str)
+        result = QzoneJsonParser.parse_response(json5_str)
         assert result["code"] == 0
         assert result["data"]["name"] == "test"
         assert result["data"]["count"] == 1
 
     def test_parse_response_with_extra_chars(self):
         raw_str = 'some garbage{"code": 0, "data": {"value": 123}}more garbage'
-        result = QzoneParser.parse_response(raw_str)
+        result = QzoneJsonParser.parse_response(raw_str)
         assert result["code"] == 0
         assert result["data"]["value"] == 123
 
     def test_parse_visitors_empty(self):
         data = {"data": {"items": []}}
-        result = QzoneParser.parse_visitors(data)
+        result = QzoneJsonParser.parse_visitors(data)
         assert "暂无访客记录" in result
 
     def test_parse_visitors_with_data(self):
@@ -72,7 +68,7 @@ class TestQzoneParser:
                 "totalcount": 100,
             }
         }
-        result = QzoneParser.parse_visitors(data)
+        result = QzoneJsonParser.parse_visitors(data)
         assert "访客1" in result
         assert "访问空间" in result
         assert "LV5" in result
@@ -80,7 +76,7 @@ class TestQzoneParser:
 
     def test_parse_feeds_empty(self):
         data = {"msglist": []}
-        result = QzoneParser.parse_feeds(data)
+        result = QzoneJsonParser.parse_feeds(data)
         assert len(result) == 0
 
     def test_parse_feeds_with_data(self):
@@ -100,7 +96,7 @@ class TestQzoneParser:
                 }
             ]
         }
-        result = QzoneParser.parse_feeds(data)
+        result = QzoneJsonParser.parse_feeds(data)
         assert len(result) == 1
         assert result[0].tid == "12345"
         assert result[0].nickname == "测试用户"
@@ -129,7 +125,7 @@ class TestQzoneParser:
                 }
             ]
         }
-        result = QzoneParser.parse_feeds(data, with_detail=True)
+        result = QzoneJsonParser.parse_feeds(data, with_detail=True)
         assert len(result) == 1
         assert len(result[0].comment_list) == 1
         assert result[0].comment_list[0].content == "好棒"

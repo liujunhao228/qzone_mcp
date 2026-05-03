@@ -4,20 +4,7 @@ from typing import Optional, List, Literal
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-
-class LLMConfig(BaseModel):
-    provider: str = Field(default="mock", description="LLM 提供商: openai, mock")
-    api_key: str = Field(default="", description="LLM API Key")
-    model: str = Field(default="gpt-4o", description="LLM 模型名称")
-    api_base: Optional[str] = Field(default=None, description="自定义 API 地址")
-    comment_prompt: str = Field(
-        default="请针对以下说说内容生成一条合适的评论，语气友好自然，字数在50-200字之间：\n{content}",
-        description="生成评论的提示词"
-    )
-    post_prompt: str = Field(
-        default="请根据以下主题生成一条有趣的说说，语气轻松活泼，适合在QQ空间发布：\n{topic}",
-        description="生成说说的提示词"
-    )
+from .config_manager import default_manager
 
 
 class OneBotConfig(BaseModel):
@@ -73,5 +60,25 @@ class AppConfig(BaseSettings):
     def ensure_data_dir(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
+    def load_from_config_manager(self) -> None:
+        cfg = default_manager.load()
+        self.qzone.cookie = cfg.qzone.cookie
+        self.qzone.timeout = cfg.qzone.timeout
+        self.qzone.max_retries = cfg.qzone.max_retries
+        self.qzone.retry_delay = cfg.qzone.retry_delay
+        self.onebot.enabled = cfg.onebot.enabled
+        self.onebot.provider = cfg.onebot.provider
+        self.onebot.host = cfg.onebot.host
+        self.onebot.port = cfg.onebot.port
+        self.onebot.timeout = cfg.onebot.timeout
+        self.onebot.api_path = cfg.onebot.api_path
+        self.onebot.token = cfg.onebot.token if cfg.onebot.token else None
+        self.log.level = cfg.log.level
+        self.log.max_size = cfg.log.max_size
+        self.log.backup_count = cfg.log.backup_count
+        self.log.console_enabled = cfg.log.console_enabled
+        self.log.file_enabled = cfg.log.file_enabled
+
 
 config = AppConfig()
+config.load_from_config_manager()

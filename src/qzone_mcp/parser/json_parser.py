@@ -170,67 +170,110 @@ class QzoneJsonParser:
 
     @staticmethod
     def parse_feeds(data: dict[str, Any], with_detail: bool = False) -> List[Feed]:
+        if not isinstance(data, dict):
+            return []
+            
         msglist = data.get("msglist", [])
         if not isinstance(msglist, list):
             msglist = []
+        
+        # 如果没有 msglist，尝试直接解析 data（用于单条说说详情接口）
+        if not msglist:
+            msglist = [data]
 
         posts: List[Feed] = []
         for msg in msglist:
             if not isinstance(msg, dict):
                 continue
 
+            # 图片处理
             image_urls: List[str] = []
-            for img_data in msg.get("pic", []):
-                if isinstance(img_data, dict):
-                    for key in ("url2", "url3", "url1", "smallurl"):
-                        if raw := img_data.get(key):
-                            image_urls.append(raw)
-                            break
+            pic_data = msg.get("pic", [])
+            if isinstance(pic_data, list):
+                for img_data in pic_data:
+                    if isinstance(img_data, dict):
+                        for key in ("url2", "url3", "url1", "smallurl"):
+                            if raw := img_data.get(key):
+                                image_urls.append(str(raw))
+                                break
 
+            # 视频处理
             video_urls: List[str] = []
-            for video in msg.get("video") or []:
-                if isinstance(video, dict):
-                    video_image_url = video.get("url1") or video.get("pic_url")
-                    if video_image_url:
-                        image_urls.append(video_image_url)
-                    url3 = video.get("url3")
-                    if url3:
-                        video_urls.append(url3)
+            video_data = msg.get("video") or []
+            if isinstance(video_data, list):
+                for video in video_data:
+                    if isinstance(video, dict):
+                        video_image_url = video.get("url1") or video.get("pic_url")
+                        if video_image_url:
+                            image_urls.append(str(video_image_url))
+                        url3 = video.get("url3")
+                        if url3:
+                            video_urls.append(str(url3))
 
+            # 转发内容处理
             rt_con = msg.get("rt_con", {}).get("content", "")
             if isinstance(rt_con, dict):
                 rt_con = rt_con.get("content", "") or ""
+            rt_con = str(rt_con)
 
+            # 评论处理（包含楼中楼）
             comment_list: List[FeedComment] = []
             if with_detail:
                 comments_data = msg.get("commentlist", [])
-                for comm in comments_data:
-                    if isinstance(comm, dict):
-                        comment = FeedComment(
-                            id=str(comm.get("commentid", "")),
-                            uin=comm.get("uin", 0),
-                            nickname=comm.get("name", ""),
-                            content=comm.get("content", ""),
-                            time=comm.get("time", "")
-                        )
-                        comment_list.append(comment)
+                if isinstance(comments_data, list):
+                    for comm in comments_data:
+                        if isinstance(comm, dict):
+                            # 主评论
+                            main_comment = FeedComment(
+                                id=str(comm.get("commentid", "") or comm.get("tid", "")),
+                                uin=int(comm.get("uin") or 0),
+                                nickname=str(comm.get("name", "")),
+                                content=str(comm.get("content", "")),
+                                time=str(comm.get("time", "") or comm.get("createTime2", "")),
+                                parent_id=None
+                            )
+                            comment_list.append(main_comment)
+
+                            # 楼中楼回复
+                            sub_comments = comm.get("list_3", [])
+                            if isinstance(sub_comments, list):
+                                for sub in sub_comments:
+                                    if isinstance(sub, dict):
+                                        sub_comment = FeedComment(
+                                            id=str(sub.get("commentid", "") or sub.get("tid", "")),
+                                            uin=int(sub.get("uin") or 0),
+                                            nickname=str(sub.get("name", "")),
+                                            content=str(sub.get("content", "")),
+                                            time=str(sub.get("time", "") or sub.get("createTime2", "")),
+                                            parent_id=main_comment.id
+                                        )
+                                        comment_list.append(sub_comment)
 
             images = [FeedImage(url=url) for url in image_urls]
 
+            # 元数据提取（带空值保护）
+            like_num = int(msg.get("likenum") or msg.get("like_num") or msg.get("likeNum") or 0)
+            comment_num = len(comment_list) if comment_list else int(msg.get("commentnum") or msg.get("cmtnum") or 0)
+            share_num = int(msg.get("sharenum") or msg.get("rtnum") or msg.get("forwardnum") or 0)
+            view_num = int(msg.get("readnum") or msg.get("viewnum") or 0)
+            source_name = str(msg.get("source_name") or msg.get("sourceApp") or "")
+
             post = Feed(
                 tid=str(msg.get("tid", "")),
-                uin=msg.get("uin", 0),
-                nickname=msg.get("name", ""),
-                content=msg.get("content", "").strip(),
+                uin=int(msg.get("uin") or 0),
+                nickname=str(msg.get("name", "")),
+                content=str(msg.get("content", "").strip()),
                 images=images,
-                likes=msg.get("likenum", 0),
-                comments=len(comment_list) if comment_list else msg.get("commentnum", 0),
-                shares=msg.get("sharenum", 0),
+                likes=like_num,
+                comments=comment_num,
+                shares=share_num,
+                views=view_num,
                 time=str(msg.get("created_time", "")),
                 comment_list=comment_list,
-                is_liked=msg.get("isliked", 0) == 1,
+                is_liked=bool(msg.get("isliked") == 1),
                 videos=video_urls,
                 rt_con=rt_con,
+                source_name=source_name,
             )
             posts.append(post)
 

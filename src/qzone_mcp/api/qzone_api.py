@@ -97,7 +97,7 @@ class QzoneAPI:
         params = {
             "tid": tid,
             "uin": author_uin,
-            "format": "json",
+            "format": "jsonp",
             "g_tk": ctx.gtk2,
         }
 

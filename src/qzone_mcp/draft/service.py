@@ -2,21 +2,15 @@ import json
 import uuid
 from typing import Optional, List, Dict, Any
 
-from ..api.legacy_api import QzoneClient
 from ..db.repository import DraftRepository, FeedRepository
 
 
 class DraftService:
     """草稿箱服务 - 提供草稿管理的业务逻辑"""
     
-    def __init__(self, qzone_client: Optional[QzoneClient] = None):
-        """
-        初始化草稿箱服务
-        
-        Args:
-            qzone_client: QzoneClient实例，用于发布草稿时调用QQ空间API
-        """
-        self.qzone_client = qzone_client
+    def __init__(self):
+        """初始化草稿箱服务"""
+        pass
     
     async def create_draft(self, content: str, title: Optional[str] = None, images: Optional[List[str]] = None) -> Dict[str, Any]:
         """
@@ -158,12 +152,13 @@ class DraftService:
         
         return await self.create_draft(content, title, images)
     
-    async def publish_draft(self, draft_id: str) -> Dict[str, Any]:
+    async def publish_draft(self, draft_id: str, api) -> Dict[str, Any]:
         """
         发布草稿为说说
         
         Args:
             draft_id: 草稿ID
+            api: QzoneAPI实例，用于调用QQ空间API
         
         Returns:
             发布结果字典
@@ -182,27 +177,34 @@ class DraftService:
                 "message": "草稿已发布"
             }
         
-        if not self.qzone_client:
+        if not api:
             return {
                 "success": False,
-                "message": "QQ空间客户端未配置，无法发布"
+                "message": "QQ空间API未配置，无法发布"
             }
         
         try:
-            images = json.loads(draft.images) if draft.images else []
-            result = await self.qzone_client.publish_post(draft.content, images)
+            from ..utils import normalize_images
             
-            if result.success:
+            images = json.loads(draft.images) if draft.images else []
+            image_bytes = None
+            if images:
+                image_bytes = await normalize_images(images)
+            
+            resp = await api.publish(draft.content, image_bytes)
+            
+            if resp.ok:
+                tid = resp.data.get("tid", "")
                 await DraftRepository.update(draft_id, {"status": "published"})
                 return {
                     "success": True,
-                    "tid": result.tid,
+                    "tid": tid,
                     "message": "发布成功"
                 }
             else:
                 return {
                     "success": False,
-                    "message": f"发布失败: {result.message}"
+                    "message": f"发布失败: {resp.message}"
                 }
         except Exception as e:
             return {

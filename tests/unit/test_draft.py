@@ -8,6 +8,7 @@ from qzone_mcp.db.manager import db_manager
 from qzone_mcp.db.repository import DraftRepository
 from qzone_mcp.draft.service import DraftService
 from qzone_mcp.config import AppConfig
+from qzone_mcp.model import ApiResponse
 
 
 @pytest.fixture(autouse=True)
@@ -19,12 +20,14 @@ async def setup_database(tmp_path):
 
 
 @pytest.fixture
-def mock_qzone_client():
-    """创建模拟的QzoneClient"""
+def mock_qzone_api():
+    """创建模拟的QzoneAPI"""
     from unittest.mock import AsyncMock
-    client = AsyncMock()
-    client.publish_post = AsyncMock(return_value=type('obj', (object,), {'success': True, 'tid': 'published_tid', 'message': '发布成功'}))
-    return client
+    api = AsyncMock()
+    api.publish = AsyncMock(return_value=ApiResponse(
+        ok=True, code=0, data={"tid": "published_tid"}, raw={"code": 0, "tid": "published_tid"}
+    ))
+    return api
 
 
 @pytest.mark.asyncio
@@ -347,15 +350,15 @@ async def test_draft_service_save_draft_existing():
 
 
 @pytest.mark.asyncio
-async def test_draft_service_publish_draft(mock_qzone_client):
-    service = DraftService(mock_qzone_client)
+async def test_draft_service_publish_draft(mock_qzone_api):
+    service = DraftService()
     
     created = await service.create_draft(
         content="要发布的草稿",
         title="发布测试"
     )
     
-    result = await service.publish_draft(created["id"])
+    result = await service.publish_draft(created["id"], mock_qzone_api)
     
     assert result["success"] is True
     assert result["tid"] == "published_tid"
@@ -369,42 +372,42 @@ async def test_draft_service_publish_draft(mock_qzone_client):
 async def test_draft_service_publish_draft_not_found():
     service = DraftService()
     
-    result = await service.publish_draft(str(uuid.uuid4()))
+    result = await service.publish_draft(str(uuid.uuid4()), None)
     
     assert result["success"] is False
     assert result["message"] == "草稿不存在"
 
 
 @pytest.mark.asyncio
-async def test_draft_service_publish_draft_already_published(mock_qzone_client):
-    service = DraftService(mock_qzone_client)
+async def test_draft_service_publish_draft_already_published(mock_qzone_api):
+    service = DraftService()
     
     created = await service.create_draft(
         content="已发布草稿",
         title="已发布"
     )
     
-    await service.publish_draft(created["id"])
+    await service.publish_draft(created["id"], mock_qzone_api)
     
-    result = await service.publish_draft(created["id"])
+    result = await service.publish_draft(created["id"], mock_qzone_api)
     
     assert result["success"] is False
     assert result["message"] == "草稿已发布"
 
 
 @pytest.mark.asyncio
-async def test_draft_service_publish_draft_no_client():
-    service = DraftService(None)
+async def test_draft_service_publish_draft_no_api():
+    service = DraftService()
     
     created = await service.create_draft(
-        content="无客户端测试",
-        title="无客户端"
+        content="无API测试",
+        title="无API"
     )
     
-    result = await service.publish_draft(created["id"])
+    result = await service.publish_draft(created["id"], None)
     
     assert result["success"] is False
-    assert result["message"] == "QQ空间客户端未配置，无法发布"
+    assert result["message"] == "QQ空间API未配置，无法发布"
 
 
 @pytest.mark.asyncio

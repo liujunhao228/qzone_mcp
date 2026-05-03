@@ -122,3 +122,89 @@ class Draft(Base):
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
+
+
+class Visitor(Base):
+    """访客模型 - 存储QQ空间访客记录"""
+    __tablename__ = "visitors"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True, comment="自增主键")
+    uin = Column(BigInteger, nullable=False, comment="访客QQ号")
+    nickname = Column(String(128), comment="访客昵称")
+    avatar = Column(String(512), comment="头像URL")
+    time = Column(String(32), comment="访问时间")
+    created_at = Column(DateTime, default=datetime.now, comment="记录创建时间")
+    
+    __table_args__ = (
+        Index("idx_visitors_uin", "uin"),
+        Index("idx_visitors_time", "time"),
+    )
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """将模型转换为字典"""
+        return {
+            "id": self.id,
+            "uin": self.uin,
+            "nickname": self.nickname,
+            "avatar": self.avatar,
+            "time": self.time,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class UserProfile(Base):
+    """用户信息模型 - 存储QQ空间用户资料"""
+    __tablename__ = "user_profiles"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True, comment="自增主键")
+    uin = Column(BigInteger, nullable=False, unique=True, comment="QQ号")
+    nickname = Column(String(128), comment="昵称")
+    avatar = Column(String(512), comment="头像URL")
+    signature = Column(Text, comment="个性签名")
+    qzone_level = Column(Integer, comment="空间等级")
+    created_at = Column(DateTime, default=datetime.now, comment="记录创建时间")
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment="记录更新时间")
+    
+    __table_args__ = (
+        Index("idx_user_profiles_uin", "uin"),
+    )
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """将模型转换为字典"""
+        return {
+            "id": self.id,
+            "uin": self.uin,
+            "nickname": self.nickname,
+            "avatar": self.avatar,
+            "signature": self.signature,
+            "qzone_level": self.qzone_level,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class LikeRecord(Base):
+    """点赞记录模型 - 存储点赞操作记录"""
+    __tablename__ = "like_records"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True, comment="自增主键")
+    tid = Column(String(64), ForeignKey("feeds.tid", ondelete="CASCADE"), nullable=False, comment="所属说说ID")
+    uin = Column(BigInteger, nullable=False, comment="点赞者QQ号")
+    time = Column(String(32), comment="点赞时间")
+    created_at = Column(DateTime, default=datetime.now, comment="记录创建时间")
+    
+    __table_args__ = (
+        Index("idx_like_records_tid", "tid"),
+        Index("idx_like_records_uin", "uin"),
+        Index("idx_like_records_tid_uin", "tid", "uin"),
+    )
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """将模型转换为字典"""
+        return {
+            "id": self.id,
+            "tid": self.tid,
+            "uin": self.uin,
+            "time": self.time,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }

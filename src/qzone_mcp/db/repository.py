@@ -4,7 +4,7 @@ from typing import Optional, List, Dict, Any
 from sqlalchemy import select, update, delete, desc, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .models import Feed, Comment, Draft
+from .models import Feed, Comment, Draft, Visitor, UserProfile, LikeRecord
 from .manager import db_manager
 
 
@@ -274,6 +274,294 @@ class DraftRepository:
             result = await session.execute(
                 select(Draft.id)
                 .filter_by(id=draft_id)
+                .limit(1)
+            )
+            return result.scalar_one_or_none() is not None
+
+
+class VisitorRepository:
+    """访客数据访问层 - 提供访客数据的CRUD操作"""
+    
+    @staticmethod
+    async def create(visitor_data: Dict[str, Any]) -> Visitor:
+        """创建访客记录"""
+        session = await db_manager.get_session()
+        async with session:
+            visitor = Visitor(**visitor_data)
+            session.add(visitor)
+            await session.commit()
+            await session.refresh(visitor)
+            return visitor
+    
+    @staticmethod
+    async def create_batch(visitors_data: List[Dict[str, Any]]) -> List[Visitor]:
+        """批量创建访客记录"""
+        session = await db_manager.get_session()
+        async with session:
+            visitors = [Visitor(**data) for data in visitors_data]
+            session.add_all(visitors)
+            await session.commit()
+            return visitors
+    
+    @staticmethod
+    async def get_by_uin(uin: int) -> Optional[Visitor]:
+        """根据访客QQ号获取访客记录"""
+        session = await db_manager.get_session()
+        async with session:
+            result = await session.execute(select(Visitor).filter_by(uin=uin))
+            return result.scalar_one_or_none()
+    
+    @staticmethod
+    async def get_all(limit: int = 50, offset: int = 0) -> List[Visitor]:
+        """获取所有访客记录"""
+        session = await db_manager.get_session()
+        async with session:
+            result = await session.execute(
+                select(Visitor)
+                .order_by(desc(Visitor.time))
+                .limit(limit)
+                .offset(offset)
+            )
+            return list(result.scalars().all())
+    
+    @staticmethod
+    async def update(uin: int, update_data: Dict[str, Any]) -> Optional[Visitor]:
+        """更新访客记录"""
+        session = await db_manager.get_session()
+        async with session:
+            result = await session.execute(
+                update(Visitor)
+                .filter_by(uin=uin)
+                .values(update_data)
+                .returning(Visitor)
+            )
+            await session.commit()
+            return result.scalar_one_or_none()
+    
+    @staticmethod
+    async def delete(uin: int) -> bool:
+        """删除访客记录"""
+        session = await db_manager.get_session()
+        async with session:
+            result = await session.execute(
+                delete(Visitor)
+                .filter_by(uin=uin)
+            )
+            await session.commit()
+            return result.rowcount > 0
+    
+    @staticmethod
+    async def count() -> int:
+        """获取访客总数"""
+        session = await db_manager.get_session()
+        async with session:
+            result = await session.execute(select(func.count()).select_from(Visitor))
+            return result.scalar_one()
+    
+    @staticmethod
+    async def exists(uin: int) -> bool:
+        """检查访客是否存在"""
+        session = await db_manager.get_session()
+        async with session:
+            result = await session.execute(
+                select(Visitor.id)
+                .filter_by(uin=uin)
+                .limit(1)
+            )
+            return result.scalar_one_or_none() is not None
+
+
+class UserProfileRepository:
+    """用户信息数据访问层 - 提供用户信息数据的CRUD操作"""
+    
+    @staticmethod
+    async def create(profile_data: Dict[str, Any]) -> UserProfile:
+        """创建用户信息记录"""
+        session = await db_manager.get_session()
+        async with session:
+            profile = UserProfile(**profile_data)
+            session.add(profile)
+            await session.commit()
+            await session.refresh(profile)
+            return profile
+    
+    @staticmethod
+    async def get_by_uin(uin: int) -> Optional[UserProfile]:
+        """根据QQ号获取用户信息"""
+        session = await db_manager.get_session()
+        async with session:
+            result = await session.execute(select(UserProfile).filter_by(uin=uin))
+            return result.scalar_one_or_none()
+    
+    @staticmethod
+    async def get_all(limit: int = 20, offset: int = 0) -> List[UserProfile]:
+        """获取所有用户信息"""
+        session = await db_manager.get_session()
+        async with session:
+            result = await session.execute(
+                select(UserProfile)
+                .order_by(desc(UserProfile.updated_at))
+                .limit(limit)
+                .offset(offset)
+            )
+            return list(result.scalars().all())
+    
+    @staticmethod
+    async def update(uin: int, update_data: Dict[str, Any]) -> Optional[UserProfile]:
+        """更新用户信息"""
+        session = await db_manager.get_session()
+        async with session:
+            result = await session.execute(
+                update(UserProfile)
+                .filter_by(uin=uin)
+                .values(update_data)
+                .returning(UserProfile)
+            )
+            await session.commit()
+            return result.scalar_one_or_none()
+    
+    @staticmethod
+    async def upsert(profile_data: Dict[str, Any]) -> UserProfile:
+        """更新或插入用户信息"""
+        session = await db_manager.get_session()
+        async with session:
+            uin = profile_data.get("uin")
+            existing = await session.execute(select(UserProfile).filter_by(uin=uin))
+            existing = existing.scalar_one_or_none()
+            
+            if existing:
+                for key, value in profile_data.items():
+                    setattr(existing, key, value)
+            else:
+                existing = UserProfile(**profile_data)
+                session.add(existing)
+            
+            await session.commit()
+            await session.refresh(existing)
+            return existing
+    
+    @staticmethod
+    async def delete(uin: int) -> bool:
+        """删除用户信息"""
+        session = await db_manager.get_session()
+        async with session:
+            result = await session.execute(
+                delete(UserProfile)
+                .filter_by(uin=uin)
+            )
+            await session.commit()
+            return result.rowcount > 0
+    
+    @staticmethod
+    async def count() -> int:
+        """获取用户信息总数"""
+        session = await db_manager.get_session()
+        async with session:
+            result = await session.execute(select(func.count()).select_from(UserProfile))
+            return result.scalar_one()
+    
+    @staticmethod
+    async def exists(uin: int) -> bool:
+        """检查用户信息是否存在"""
+        session = await db_manager.get_session()
+        async with session:
+            result = await session.execute(
+                select(UserProfile.id)
+                .filter_by(uin=uin)
+                .limit(1)
+            )
+            return result.scalar_one_or_none() is not None
+
+
+class LikeRecordRepository:
+    """点赞记录数据访问层 - 提供点赞记录数据的CRUD操作"""
+    
+    @staticmethod
+    async def create(like_data: Dict[str, Any]) -> LikeRecord:
+        """创建点赞记录"""
+        session = await db_manager.get_session()
+        async with session:
+            like = LikeRecord(**like_data)
+            session.add(like)
+            await session.commit()
+            await session.refresh(like)
+            return like
+    
+    @staticmethod
+    async def create_batch(likes_data: List[Dict[str, Any]]) -> List[LikeRecord]:
+        """批量创建点赞记录"""
+        session = await db_manager.get_session()
+        async with session:
+            likes = [LikeRecord(**data) for data in likes_data]
+            session.add_all(likes)
+            await session.commit()
+            return likes
+    
+    @staticmethod
+    async def get_by_tid(tid: str) -> List[LikeRecord]:
+        """根据说说ID获取点赞记录"""
+        session = await db_manager.get_session()
+        async with session:
+            result = await session.execute(
+                select(LikeRecord)
+                .filter_by(tid=tid)
+                .order_by(LikeRecord.created_at)
+            )
+            return list(result.scalars().all())
+    
+    @staticmethod
+    async def get_by_tid_and_uin(tid: str, uin: int) -> Optional[LikeRecord]:
+        """根据说说ID和点赞者QQ号获取点赞记录"""
+        session = await db_manager.get_session()
+        async with session:
+            result = await session.execute(
+                select(LikeRecord)
+                .filter_by(tid=tid, uin=uin)
+            )
+            return result.scalar_one_or_none()
+    
+    @staticmethod
+    async def delete_by_tid(tid: str) -> int:
+        """删除指定说说的所有点赞记录"""
+        session = await db_manager.get_session()
+        async with session:
+            result = await session.execute(
+                delete(LikeRecord)
+                .filter_by(tid=tid)
+            )
+            await session.commit()
+            return result.rowcount
+    
+    @staticmethod
+    async def delete_by_tid_and_uin(tid: str, uin: int) -> bool:
+        """删除指定说说的指定点赞记录"""
+        session = await db_manager.get_session()
+        async with session:
+            result = await session.execute(
+                delete(LikeRecord)
+                .filter_by(tid=tid, uin=uin)
+            )
+            await session.commit()
+            return result.rowcount > 0
+    
+    @staticmethod
+    async def count_by_tid(tid: str) -> int:
+        """获取指定说说的点赞数"""
+        session = await db_manager.get_session()
+        async with session:
+            result = await session.execute(
+                select(func.count()).select_from(LikeRecord).filter_by(tid=tid)
+            )
+            return result.scalar_one()
+    
+    @staticmethod
+    async def exists(tid: str, uin: int) -> bool:
+        """检查点赞记录是否存在"""
+        session = await db_manager.get_session()
+        async with session:
+            result = await session.execute(
+                select(LikeRecord.id)
+                .filter_by(tid=tid, uin=uin)
                 .limit(1)
             )
             return result.scalar_one_or_none() is not None

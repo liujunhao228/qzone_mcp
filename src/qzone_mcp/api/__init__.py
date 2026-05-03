@@ -17,15 +17,10 @@ from .constants import (
     QZONE_CODE_PERMISSION_DENIED,
     QZONE_CODE_PERMISSION_DENIED_LEGACY,
 )
-from .legacy_api import QzoneClient, PublishResult, LikeResult, CommentResult
 
 __all__ = [
     "QzoneHttpClient",
     "QzoneAPI",
-    "QzoneClient",
-    "PublishResult",
-    "LikeResult",
-    "CommentResult",
     "QZONE_BASE_URL",
     "QZONE_UPLOAD_IMAGE_URL",
     "QZONE_EMOTION_URL",

@@ -5,14 +5,16 @@ from typing import Optional, List
 import typer
 
 from .api.session import QzoneSession
-from .api.client import QzoneClient
+from .api.client import QzoneHttpClient
+from .api.qzone_api import QzoneAPI
 from .adapters.llm import create_llm_adapter
 from .config import config
 
 app = typer.Typer(name="qzone-cli", help="QQ空间命令行工具")
 
 session = QzoneSession(config)
-client = QzoneClient(session)
+http_client = QzoneHttpClient(session, config)
+api = QzoneAPI(http_client)
 llm = create_llm_adapter(config)
 
 
@@ -23,7 +25,15 @@ def get_feeds(
     detail: bool = typer.Option(False, "--detail", "-d", help="获取详情")
 ):
     try:
-        feeds = asyncio.run(client.get_feeds(user, 0, num, detail))
+        async def fetch_feeds():
+            from .model import Feed
+            resp = await api.get_feeds(user or "", pos=0, num=num, with_detail=detail)
+            if resp.ok:
+                feeds_data = resp.data.get("feeds", [])
+                return [Feed(**feed) for feed in feeds_data]
+            return []
+        
+        feeds = asyncio.run(fetch_feeds())
         for i, feed in enumerate(feeds, 1):
             print(f"\n=== 说说 {i} ===")
             print(f"作者: {feed.nickname} ({feed.uin})")
@@ -42,12 +52,23 @@ def publish_post(
     image: Optional[str] = typer.Option(None, "--image", "-i", help="图片URL，多个用逗号分隔")
 ):
     try:
-        images = image.split(",") if image else []
-        result = asyncio.run(client.publish_post(text, images))
-        if result.success:
-            typer.echo(f"发布成功！说说ID: {result.tid}")
+        async def do_publish():
+            from ..utils import normalize_images
+            
+            images = image.split(",") if image else []
+            image_bytes = None
+            if images:
+                image_bytes = await normalize_images(images)
+            
+            resp = await api.publish(text, image_bytes)
+            return resp
+        
+        resp = asyncio.run(do_publish())
+        if resp.ok:
+            tid = resp.data.get("tid", "")
+            typer.echo(f"发布成功！说说ID: {tid}")
         else:
-            typer.echo(f"发布失败: {result.message}", err=True)
+            typer.echo(f"发布失败: {resp.message}", err=True)
     except Exception as e:
         typer.echo(f"错误: {e}", err=True)
 
@@ -58,11 +79,15 @@ def like_post(
     author_uin: int = typer.Option(..., "--author", help="作者QQ号", prompt=True)
 ):
     try:
-        result = asyncio.run(client.like_post(tid, author_uin))
-        if result.success:
+        async def do_like():
+            resp = await api.like(tid, author_uin)
+            return resp.ok
+        
+        success = asyncio.run(do_like())
+        if success:
             typer.echo("点赞成功！")
         else:
-            typer.echo(f"点赞失败: {result.message}", err=True)
+            typer.echo("点赞失败", err=True)
     except Exception as e:
         typer.echo(f"错误: {e}", err=True)
 
@@ -74,11 +99,16 @@ def comment_post(
     content: str = typer.Option(None, "--content", "-c", help="评论内容", prompt=True)
 ):
     try:
-        result = asyncio.run(client.comment_post(tid, author_uin, content))
-        if result.success:
-            typer.echo(f"评论成功！评论ID: {result.comment_id}")
+        async def do_comment():
+            resp = await api.comment(tid, author_uin, content)
+            return resp
+        
+        resp = asyncio.run(do_comment())
+        if resp.ok:
+            comment_id = resp.data.get("commentId", "")
+            typer.echo(f"评论成功！评论ID: {comment_id}")
         else:
-            typer.echo(f"评论失败: {result.message}", err=True)
+            typer.echo(f"评论失败", err=True)
     except Exception as e:
         typer.echo(f"错误: {e}", err=True)
 
@@ -89,7 +119,13 @@ def get_visitors(
     num: int = typer.Option(20, "--num", "-n", help="每页数量")
 ):
     try:
-        visitors = asyncio.run(client.get_visitors(page, num))
+        async def fetch_visitors():
+            resp = await api.get_visitors(page, num)
+            if resp.ok:
+                return resp.data.get("visitors", [])
+            return []
+        
+        visitors = asyncio.run(fetch_visitors())
         for i, visitor in enumerate(visitors, 1):
             print(f"\n访客 {i}: {visitor.nickname} ({visitor.uin})")
             print(f"访问时间: {visitor.time}")
@@ -114,10 +150,16 @@ def login(
 @app.command("status", help="查看登录状态")
 def login_status():
     try:
-        is_logged_in = session.is_logged_in
+        async def get_status():
+            is_logged_in = session.is_logged_in
+            if is_logged_in:
+                ctx = await session.get_ctx()
+                return is_logged_in, ctx.uin
+            return is_logged_in, None
+        
+        is_logged_in, uin = asyncio.run(get_status())
         if is_logged_in:
-            ctx = asyncio.run(session.get_ctx())
-            typer.echo(f"已登录 | QQ号: {ctx.uin}")
+            typer.echo(f"已登录 | QQ号: {uin}")
         else:
             typer.echo("未登录")
     except Exception as e:

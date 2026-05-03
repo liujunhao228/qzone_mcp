@@ -12,10 +12,13 @@ from fastmcp.tools.base import ToolResult
 from mcp.types import ToolAnnotations
 
 from .session import QzoneSession, LoginExpiredError, CookieParseError
-from .api.legacy_api import QzoneClient
+from .api.client import QzoneHttpClient
+from .api.qzone_api import QzoneAPI
 from .config import config
 from .db.manager import db_manager
-from .db.repository import FeedRepository, CommentRepository
+from .db.repository import FeedRepository, CommentRepository, VisitorRepository, UserProfileRepository, LikeRecordRepository
+from .db.backup import backup_manager
+from .db.validation import data_validator
 from .draft.service import DraftService
 from .logging import get_logger, init_logging
 
@@ -50,8 +53,9 @@ mcp = FastMCP(
 )
 
 session = QzoneSession(config)
-client = QzoneClient(session)
-draft_service = DraftService(client)
+http_client = QzoneHttpClient(session, config)
+api = QzoneAPI(http_client)
+draft_service = DraftService()
 
 shutdown_event = asyncio.Event()
 
@@ -59,7 +63,7 @@ shutdown_event = asyncio.Event()
 async def cleanup_resources():
     logger.info("开始清理资源...")
     
-    await client.close()
+    await http_client.close()
     logger.info("HTTP 会话已关闭")
     
     await db_manager.close()
@@ -115,8 +119,13 @@ async def qzone_get_feeds(
         if num < 1 or num > 50:
             return ToolResult(content="参数错误：num 必须在 1-50 之间")
         
-        feeds = await client.get_feeds(user_id, pos, num, with_detail)
-        return ToolResult(structured_content={"result": [f.model_dump() for f in feeds]})
+        resp = await api.get_feeds(user_id or "", pos=pos, num=num, with_detail=with_detail)
+        if resp.ok:
+            feeds_data = resp.data.get("feeds", [])
+            from .model import Feed
+            feeds = [Feed(**feed) for feed in feeds_data]
+            return ToolResult(structured_content={"result": [f.model_dump() for f in feeds]})
+        return ToolResult(content=f"获取说说失败：{resp.message}")
     except LoginExpiredError:
         return ToolResult(content="登录失效，请使用 qzone_set_cookie 工具重新设置Cookie")
     except ValueError as e:
@@ -164,8 +173,12 @@ async def qzone_get_post_detail(
         if not tid or not author_uin:
             return ToolResult(content="参数错误：tid 和 author_uin 均为必填参数")
         
-        feed = await client.get_post_detail(tid, author_uin)
-        return ToolResult(structured_content={"result": feed.model_dump()})
+        resp = await api.get_post_detail(tid, author_uin)
+        if resp.ok and resp.data.get("feed"):
+            from .model import Feed
+            feed = Feed(**resp.data["feed"])
+            return ToolResult(structured_content={"result": feed.model_dump()})
+        return ToolResult(content="获取说说详情失败")
     except LoginExpiredError:
         return ToolResult(content="登录失效，请使用 qzone_set_cookie 工具重新设置Cookie")
     except ValueError as e:
@@ -213,10 +226,20 @@ async def qzone_publish_post(
         if image_urls and len(image_urls) > 9:
             return ToolResult(content="参数错误：最多支持9张图片")
         
-        result = await client.publish_post(text.strip(), image_urls or [])
-        if result.success:
-            return ToolResult(structured_content={"result": result.model_dump()})
-        return ToolResult(content=f"发布失败：{result.message}")
+        from ..utils import normalize_images
+        
+        images = None
+        if image_urls:
+            images = await normalize_images(image_urls)
+        
+        resp = await api.publish(text.strip(), images)
+        
+        if resp.ok:
+            tid = resp.data.get("tid", "")
+            logger.info(f"发布说说成功 - tid: {tid}, content: {text[:50]}...")
+            return ToolResult(structured_content={"result": {"success": True, "tid": tid, "message": "发布成功"}})
+        logger.warning(f"发布说说失败 - content: {text[:50]}..., response: {resp.raw}")
+        return ToolResult(content=f"发布失败：{resp.message}")
     except LoginExpiredError:
         return ToolResult(content="登录失效，请使用 qzone_set_cookie 工具重新设置Cookie")
     except ValueError as e:
@@ -257,10 +280,10 @@ async def qzone_like_post(
         if not tid or not author_uin:
             return ToolResult(content="参数错误：tid 和 author_uin 均为必填参数")
         
-        result = await client.like_post(tid, author_uin)
-        if result.success:
-            return ToolResult(structured_content={"result": result.model_dump()})
-        return ToolResult(content=f"点赞失败：{result.message}")
+        resp = await api.like(tid, author_uin)
+        if resp.ok:
+            return ToolResult(structured_content={"result": {"success": True, "message": "点赞成功"}})
+        return ToolResult(content=f"点赞失败：{resp.message}")
     except LoginExpiredError:
         return ToolResult(content="登录失效，请使用 qzone_set_cookie 工具重新设置Cookie")
     except ValueError as e:
@@ -307,10 +330,11 @@ async def qzone_comment_post(
         if len(content) > 500:
             return ToolResult(content="参数错误：评论内容超过最大长度限制（500字）")
         
-        result = await client.comment_post(tid, author_uin, content.strip())
-        if result.success:
-            return ToolResult(structured_content={"result": result.model_dump()})
-        return ToolResult(content=f"评论失败：{result.message}")
+        resp = await api.comment(tid, author_uin, content.strip())
+        if resp.ok:
+            comment_id = resp.data.get("commentId", "")
+            return ToolResult(structured_content={"result": {"success": True, "comment_id": comment_id, "message": "评论成功"}})
+        return ToolResult(content=f"评论失败：{resp.message}")
     except LoginExpiredError:
         return ToolResult(content="登录失效，请使用 qzone_set_cookie 工具重新设置Cookie")
     except ValueError as e:
@@ -359,10 +383,11 @@ async def qzone_reply_comment(
         if len(content) > 500:
             return ToolResult(content="参数错误：回复内容超过最大长度限制（500字）")
         
-        result = await client.reply_comment(tid, author_uin, comment_id, content.strip())
-        if result.success:
-            return ToolResult(structured_content={"result": result.model_dump()})
-        return ToolResult(content=f"回复失败：{result.message}")
+        resp = await api.reply_comment(tid, author_uin, comment_id, content.strip())
+        if resp.ok:
+            reply_id = resp.data.get("replyId", "")
+            return ToolResult(structured_content={"result": {"success": True, "comment_id": reply_id, "message": "回复成功"}})
+        return ToolResult(content=f"回复失败：{resp.message}")
     except LoginExpiredError:
         return ToolResult(content="登录失效，请使用 qzone_set_cookie 工具重新设置Cookie")
     except ValueError as e:
@@ -401,10 +426,10 @@ async def qzone_delete_post(
         if not tid:
             return ToolResult(content="参数错误：tid 为必填参数")
         
-        result = await client.delete_post(tid)
-        if result.success:
-            return ToolResult(structured_content={"result": result.model_dump()})
-        return ToolResult(content=f"删除失败：{result.message}")
+        resp = await api.delete(tid)
+        if resp.ok:
+            return ToolResult(structured_content={"result": {"success": True, "message": "删除成功"}})
+        return ToolResult(content=f"删除失败：{resp.message}")
     except LoginExpiredError:
         return ToolResult(content="登录失效，请使用 qzone_set_cookie 工具重新设置Cookie")
     except ValueError as e:
@@ -450,8 +475,13 @@ async def qzone_get_friend_feeds(
         if num < 1 or num > 50:
             return ToolResult(content="参数错误：num 必须在 1-50 之间")
         
-        feeds = await client.get_friend_feeds(pos, num)
-        return ToolResult(structured_content={"result": [f.model_dump() for f in feeds]})
+        page = pos // num + 1
+        resp = await api.get_recent_feeds(page)
+        if resp.ok and resp.data:
+            from ..parser import QzoneHtmlParser
+            feeds = QzoneHtmlParser.parse_recent_feeds(resp.data)
+            return ToolResult(structured_content={"result": [f.model_dump() for f in feeds[pos : pos + num]]})
+        return ToolResult(content="获取好友动态失败")
     except LoginExpiredError:
         return ToolResult(content="登录失效，请使用 qzone_set_cookie 工具重新设置Cookie")
     except ValueError as e:
@@ -487,8 +517,10 @@ async def qzone_get_visitors(
         if num < 1 or num > 50:
             return ToolResult(content="参数错误：num 必须在 1-50 之间")
         
-        visitors = await client.get_visitors(page, num)
-        return ToolResult(content=visitors)
+        resp = await api.get_visitors(page, num)
+        if resp.ok:
+            return ToolResult(content=resp.data.get("visitors", "暂无访客记录"))
+        return ToolResult(content="获取访客记录失败")
     except LoginExpiredError:
         return ToolResult(content="登录失效，请使用 qzone_set_cookie 工具重新设置Cookie")
     except ValueError as e:
@@ -1365,7 +1397,7 @@ async def qzone_publish_draft(draft_id: str) -> ToolResult:
         
         await db_manager.initialize()
         
-        result = await draft_service.publish_draft(draft_id)
+        result = await draft_service.publish_draft(draft_id, api)
         
         return ToolResult(structured_content={"result": result})
     
@@ -1410,35 +1442,335 @@ async def qzone_get_draft_count(status: Optional[str] = None) -> ToolResult:
         return ToolResult(content=f"获取草稿数量失败：{str(e)}")
 
 
-async def run_server():
-    await db_manager.initialize()
-    logger.info("数据库初始化完成")
+# ==================== 数据备份与恢复工具 ====================
+
+@mcp.tool(
+    name="qzone_backup_database",
+    description="备份数据库",
+    annotations=ToolAnnotations(readOnlyHint=False)
+)
+async def qzone_backup_database() -> ToolResult:
+    """
+    手动触发数据库备份
     
+    Returns:
+        备份结果
+    
+    Example:
+        {
+            "result": {
+                "success": true,
+                "message": "备份成功",
+                "backup_path": "/home/user/.qzone/backups/qzone_backup_20240115_103000.db"
+            }
+        }
+    """
+    try:
+        await db_manager.initialize()
+        
+        success = await backup_manager.backup()
+        
+        if success:
+            backups = backup_manager.list_backups()
+            latest = backups[0] if backups else None
+            return ToolResult(structured_content={
+                "result": {
+                    "success": True,
+                    "message": "备份成功",
+                    "backup_path": latest["path"] if latest else None
+                }
+            })
+        return ToolResult(content="备份失败")
+    
+    except Exception as e:
+        logger.error(f"数据库备份失败: {e}")
+        return ToolResult(content=f"数据库备份失败：{str(e)}")
+
+
+@mcp.tool(
+    name="qzone_list_backups",
+    description="获取备份文件列表",
+    annotations=ToolAnnotations(readOnlyHint=True)
+)
+async def qzone_list_backups() -> ToolResult:
+    """
+    获取所有备份文件列表
+    
+    Returns:
+        备份文件列表
+    
+    Example:
+        {
+            "result": [
+                {
+                    "filename": "qzone_backup_20240115_103000.db",
+                    "path": "/home/user/.qzone/backups/qzone_backup_20240115_103000.db",
+                    "size": 102400,
+                    "created_at": "2024-01-15T10:30:00"
+                }
+            ]
+        }
+    """
+    try:
+        backups = backup_manager.list_backups()
+        return ToolResult(structured_content={"result": backups})
+    
+    except Exception as e:
+        logger.error(f"获取备份列表失败: {e}")
+        return ToolResult(content=f"获取备份列表失败：{str(e)}")
+
+
+@mcp.tool(
+    name="qzone_restore_database",
+    description="从备份恢复数据库",
+    annotations=ToolAnnotations(readOnlyHint=False)
+)
+async def qzone_restore_database(backup_filename: str) -> ToolResult:
+    """
+    从指定备份文件恢复数据库
+    
+    Args:
+        backup_filename: 备份文件名（必填）
+    
+    Returns:
+        恢复结果
+    
+    Example:
+        {
+            "result": {
+                "success": true,
+                "message": "恢复成功",
+                "backup_file": "qzone_backup_20240115_103000.db"
+            }
+        }
+    """
+    try:
+        if not backup_filename:
+            return ToolResult(content="参数错误：backup_filename 为必填参数")
+        
+        success = await backup_manager.restore(backup_filename)
+        
+        if success:
+            return ToolResult(structured_content={
+                "result": {
+                    "success": True,
+                    "message": "恢复成功",
+                    "backup_file": backup_filename
+                }
+            })
+        return ToolResult(content="恢复失败：备份文件不存在或恢复过程出错")
+    
+    except Exception as e:
+        logger.error(f"数据库恢复失败: {e}")
+        return ToolResult(content=f"数据库恢复失败：{str(e)}")
+
+
+# ==================== 数据验证与修复工具 ====================
+
+@mcp.tool(
+    name="qzone_validate_data",
+    description="验证数据完整性",
+    annotations=ToolAnnotations(readOnlyHint=True)
+)
+async def qzone_validate_data() -> ToolResult:
+    """
+    验证数据库中数据的完整性和一致性
+    
+    Returns:
+        验证结果，包含各表状态和问题列表
+    
+    Example:
+        {
+            "result": {
+                "status": "success",
+                "tables": {
+                    "feeds": {"valid": true, "count": 100, "issues": []},
+                    "comments": {"valid": true, "count": 500, "issues": []}
+                },
+                "issues": [],
+                "summary": {
+                    "total_tables": 6,
+                    "valid_tables": 6,
+                    "total_issues": 0,
+                    "data_count": {...}
+                }
+            }
+        }
+    """
+    try:
+        await db_manager.initialize()
+        
+        result = await data_validator.validate_integrity()
+        
+        return ToolResult(structured_content={"result": result})
+    
+    except Exception as e:
+        logger.error(f"数据验证失败: {e}")
+        return ToolResult(content=f"数据验证失败：{str(e)}")
+
+
+@mcp.tool(
+    name="qzone_repair_data",
+    description="修复数据问题",
+    annotations=ToolAnnotations(readOnlyHint=False)
+)
+async def qzone_repair_data() -> ToolResult:
+    """
+    修复数据库中的数据问题，主要修复孤儿记录
+    
+    Returns:
+        修复结果
+    
+    Example:
+        {
+            "result": {
+                "status": "success",
+                "deleted": {
+                    "comments": 0,
+                    "like_records": 0
+                },
+                "errors": []
+            }
+        }
+    """
+    try:
+        await db_manager.initialize()
+        
+        result = await data_validator.repair_orphan_records()
+        
+        return ToolResult(structured_content={"result": result})
+    
+    except Exception as e:
+        logger.error(f"数据修复失败: {e}")
+        return ToolResult(content=f"数据修复失败：{str(e)}")
+
+
+@mcp.tool(
+    name="qzone_get_database_stats",
+    description="获取数据库统计信息",
+    annotations=ToolAnnotations(readOnlyHint=True)
+)
+async def qzone_get_database_stats() -> ToolResult:
+    """
+    获取数据库中各表的数据统计信息
+    
+    Returns:
+        统计信息
+    
+    Example:
+        {
+            "result": {
+                "feeds": 100,
+                "comments": 500,
+                "drafts": 10,
+                "visitors": 200,
+                "user_profiles": 50,
+                "like_records": 300
+            }
+        }
+    """
+    try:
+        await db_manager.initialize()
+        
+        stats = await data_validator.get_database_stats()
+        
+        return ToolResult(structured_content={"result": stats})
+    
+    except Exception as e:
+        logger.error(f"获取数据库统计失败: {e}")
+        return ToolResult(content=f"获取数据库统计失败：{str(e)}")
+
+
+# ==================== 服务器管理工具 ====================
+
+@mcp.tool(
+    name="qzone_start_auto_backup",
+    description="启动自动定时备份",
+    annotations=ToolAnnotations(readOnlyHint=False)
+)
+async def qzone_start_auto_backup() -> ToolResult:
+    """
+    启动自动定时备份任务（每24小时备份一次）
+    
+    Returns:
+        操作结果
+    
+    Example:
+        {
+            "result": {
+                "success": true,
+                "message": "自动备份已启动"
+            }
+        }
+    """
+    try:
+        await backup_manager.start_scheduled_backup()
+        return ToolResult(structured_content={
+            "result": {
+                "success": True,
+                "message": "自动备份已启动"
+            }
+        })
+    
+    except Exception as e:
+        logger.error(f"启动自动备份失败: {e}")
+        return ToolResult(content=f"启动自动备份失败：{str(e)}")
+
+
+@mcp.tool(
+    name="qzone_stop_auto_backup",
+    description="停止自动定时备份",
+    annotations=ToolAnnotations(readOnlyHint=False)
+)
+async def qzone_stop_auto_backup() -> ToolResult:
+    """
+    停止自动定时备份任务
+    
+    Returns:
+        操作结果
+    
+    Example:
+        {
+            "result": {
+                "success": true,
+                "message": "自动备份已停止"
+            }
+        }
+    """
+    try:
+        await backup_manager.stop_scheduled_backup()
+        return ToolResult(structured_content={
+            "result": {
+                "success": True,
+                "message": "自动备份已停止"
+            }
+        })
+    
+    except Exception as e:
+        logger.error(f"停止自动备份失败: {e}")
+        return ToolResult(content=f"停止自动备份失败：{str(e)}")
+
+
+async def _main():
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
-    logger.info("QQ空间 MCP 服务器启动")
+    from pathlib import Path
+    db_path = Path(__file__).parent.parent.parent / "qzone.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    await db_manager.initialize(db_path=db_path)
     
-    mcp_task = asyncio.create_task(mcp.run_async())
+    logger.info("Qzone MCP server starting...")
     
-    await shutdown_event.wait()
-    
-    logger.info("开始优雅退出...")
-    
-    mcp_task.cancel()
-    try:
-        await mcp_task
-    except asyncio.CancelledError:
-        logger.info("MCP 服务器任务已取消")
-    
-    await cleanup_resources()
-    
-    logger.info("服务器已优雅退出")
-    sys.exit(0)
+    await mcp.run_http_async(
+        host="127.0.0.1",
+        port=27739,
+        show_banner=True
+    )
 
 
 def main():
-    asyncio.run(run_server())
+    asyncio.run(_main())
 
 
 if __name__ == "__main__":

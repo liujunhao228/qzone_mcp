@@ -52,6 +52,9 @@ class DatabaseManager:
             config.ensure_data_dir()
             db_path = config.data_dir / "qzone.db"
             database_url = f"sqlite+aiosqlite:///{db_path}"
+            logger.debug(f"Database path: {db_path}")
+            logger.debug(f"Database path exists: {db_path.parent.exists()}")
+            logger.debug(f"Database path is dir: {db_path.parent.is_dir()}")
         elif str(db_path) == ":memory:":
             # 内存数据库
             database_url = "sqlite+aiosqlite:///:memory:"
@@ -59,6 +62,11 @@ class DatabaseManager:
             # 如果提供了数据库路径，确保其父目录存在
             db_path.parent.mkdir(parents=True, exist_ok=True)
             database_url = f"sqlite+aiosqlite:///{db_path}"
+        
+        # 额外确保目录存在
+        if db_path and db_path != ":memory:":
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+        
         self._engine = create_async_engine(
             database_url,
             echo=False,
